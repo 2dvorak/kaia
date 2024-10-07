@@ -65,6 +65,7 @@ type DBManager interface {
 	GetMemDB() *MemDB
 	GetDBConfig() *DBConfig
 	getDatabase(DBEntryType) Database
+	GetDatabase(DBEntryType) Database
 	CreateMigrationDBAndSetStatus(blockNum uint64) error
 	FinishStateMigration(succeed bool) chan struct{}
 	GetStateTrieDB() Database
@@ -962,6 +963,10 @@ func (dbm *databaseManager) getDatabase(dbEntryType DBEntryType) Database {
 	} else {
 		return dbm.dbs[dbEntryType]
 	}
+}
+
+func (dbm *databaseManager) GetDatabase(dbEntryType DBEntryType) Database {
+	return dbm.getDatabase(dbEntryType)
 }
 
 func (dbm *databaseManager) Close() {
