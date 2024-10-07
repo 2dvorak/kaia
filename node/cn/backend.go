@@ -26,7 +26,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"os"
 	"os/exec"
 	"runtime"
 	"sync"
@@ -210,22 +209,6 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 	}
 
 	chainDB := CreateDB(ctx, config, "chaindata")
-
-	hash := "0xa377c10aebf190e742bb3f6d7f763a19db92a145aee1c3f8d203722750b81c4b"
-
-	body := chainDB.ReadBody(common.HexToHash(hash), 1)
-	fmt.Printf("body: %v\n", body)
-
-	b := chainDB.ReadBlock(common.HexToHash(hash), 1)
-	fmt.Printf("block: %v\n", b)
-	c := chainDB.GetDBConfig()
-	fmt.Printf("config: %v\n", c)
-	l, err := database.NewLevelDB(c, database.BodyDB)
-	v, err := l.Get(common.Hex2Bytes(hash))
-
-	//v, err := chainDB.GetMemDB().Get(common.Hex2Bytes(hash))
-	fmt.Printf("v: %v\n err: %v\n", v, err)
-	os.Exit(1)
 
 	chainConfig, genesisHash, genesisErr := blockchain.SetupGenesisBlock(chainDB, config.Genesis, config.NetworkId, config.IsPrivate, false)
 	if _, ok := genesisErr.(*params.ConfigCompatError); genesisErr != nil && !ok {

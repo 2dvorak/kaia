@@ -28,13 +28,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kaiachain/kaia/blockchain/types"
-	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/fdlimit"
 	"github.com/kaiachain/kaia/log"
 	kaiametrics "github.com/kaiachain/kaia/metrics"
 	metricutils "github.com/kaiachain/kaia/metrics/utils"
-	"github.com/kaiachain/kaia/rlp"
 	"github.com/rcrowley/go-metrics"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/errors"
@@ -179,55 +176,6 @@ func NewLevelDB(dbc *DBConfig, entryType DBEntryType) (*levelDB, error) {
 	// (Re)check for errors and abort if opening of the db failed
 	if err != nil {
 		return nil, err
-	}
-
-	//hashstr := "0xa377c10aebf190e742bb3f6d7f763a19db92a145aee1c3f8d203722750b81c4b"
-	hashstr := "0xcfdfe7b843d210ae01eba560c61a78e04900f9860c8c07b394f7f81c19ad1429"
-	hashbyte := common.Hex2Bytes(hashstr)
-	hash := common.HexToHash(hashstr)
-	blocknum := uint64(119)
-	if entryType == headerDB {
-		/*ro := &opt.ReadOptions{
-			DontFillCache: false,
-		}*/
-		v, err := db.Get(hashbyte, nil)
-		fmt.Printf("v: %v\n err: %v\n", v, err)
-
-		v, err = db.Get(headerKey(blocknum, hash), nil)
-		fmt.Printf("v: %v\n err: %v\n", v, err)
-
-		b := types.Header{}
-		err = rlp.DecodeBytes(v, &b)
-		fmt.Printf("decoded: %v, err: %v\n", b, err)
-
-		//i := db.NewIterator()
-		//os.Exit(1)
-	}
-	if entryType == BodyDB {
-		//body, err := db.
-		v, err := db.Get(hashbyte, nil)
-		fmt.Printf("v: %v\n err: %v\n", v, err)
-
-		v, err = db.Get(blockBodyKey(blocknum, hash), nil)
-		fmt.Printf("v: %v\n err: %v\n", v, err)
-
-		b := types.Body{}
-		err = rlp.DecodeBytes(v, &b)
-		fmt.Printf("decoded: %v, err: %v\n", b, err)
-
-		it := db.NewIterator(nil, nil)
-		defer it.Release()
-
-		for it.Next() {
-			fmt.Printf("key: %v, val: %v\n", it.Key(), it.Value())
-		}
-
-		//i := db.NewIterator()
-		//os.Exit(1)
-	}
-
-	if entryType == SnapshotDB {
-		//os.Exit(1)
 	}
 
 	return &levelDB{
