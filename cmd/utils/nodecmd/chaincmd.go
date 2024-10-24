@@ -30,6 +30,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/types"
@@ -283,10 +284,12 @@ func iterTrie(ctx *cli.Context) error {
 	var innerSize uint64
 	var count uint64
 	iter := trie.NodeIterator([]byte{})
+	startTime := time.Now()
 	for iter.Next(true) {
 		count++
 		if count%10000 == 0 {
-			fmt.Printf("path: %x\n", iter.Path())
+			elapsed := time.Since(startTime)
+			fmt.Printf("path: %x, elapsed: %s\n", iter.Path(), elapsed)
 		}
 
 		// NOTE preorder traversal, print path in every 10000th iter then estimate total time
