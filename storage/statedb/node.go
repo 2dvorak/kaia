@@ -123,6 +123,10 @@ func mustDecodeNode(hash, buf []byte) node {
 	return n
 }
 
+func DecodeNode(hash, buf []byte) (node, error) {
+	return decodeNode(hash, buf)
+}
+
 // decodeNode parses the RLP encoding of a trie node.
 func decodeNode(hash, buf []byte) (node, error) {
 	if len(buf) == 0 {

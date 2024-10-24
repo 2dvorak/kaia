@@ -155,6 +155,10 @@ func New(root common.Hash, db Database, snaps *snapshot.Tree, opts *statedb.Trie
 	return sdb, nil
 }
 
+func (s *StateDB) Trie() Trie {
+	return s.trie
+}
+
 // RLockGCCachedNode locks the GC lock of CachedNode.
 func (s *StateDB) LockGCCachedNode() {
 	s.db.RLockGCCachedNode()
