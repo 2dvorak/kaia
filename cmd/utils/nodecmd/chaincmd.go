@@ -32,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/types/account"
@@ -208,6 +209,26 @@ func dbGet(ctx *cli.Context) error {
 
 var emptyRoot = common.HexToHash("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
 
+type TrieStat struct {
+	leafCount, leafSize, midCount, midSize uint64
+}
+
+func (s *TrieStat) Add(other *TrieStat) {
+	s.leafCount += other.leafCount
+	s.leafSize += other.leafSize
+	s.midCount += other.midCount
+	s.midSize += other.midSize
+}
+
+type TotalStat struct {
+	accountStat   *TrieStat
+	storageStat   *TrieStat
+	storageBySize map[uint64]*TrieStat // keyed by (number of leaf / 10)
+	codeHashes    map[string]uint64    // codehash -> size. During trie iteration, codeHashes[hash] = 0. After the iteration, sizes are filled.
+	codeSize      uint64
+	mu            sync.Mutex
+}
+
 type counts struct {
 	accLeafCount   uint64
 	accInnerCount  uint64
@@ -259,6 +280,7 @@ func iterTrie(ctx *cli.Context) error {
 		return fmt.Errorf("unknown dbname '%s'", dbName)
 	}
 	db := chainDB.GetDatabase(dbEntryType)
+	_ = db
 
 	/*
 		// Wrap the database in a DBManager
@@ -273,6 +295,7 @@ func iterTrie(ctx *cli.Context) error {
 			return err
 		}*/
 
+	sdb := statedb.NewDatabase(chainDB)
 	var trie *statedb.Trie
 	var err error
 	root := ctx.Args().Get(1)
@@ -282,141 +305,272 @@ func iterTrie(ctx *cli.Context) error {
 			return err
 		}
 		rootHash := common.BytesToHash(rootBuf)
-		trie, err = statedb.NewTrie(rootHash, statedb.NewDatabase(chainDB), nil)
+		trie, err = statedb.NewTrie(rootHash, sdb, nil)
 		if err != nil {
 			return err
 		}
 	} else {
-		trie, err = statedb.NewTrie(common.Hash{}, statedb.NewDatabase(chainDB), nil)
+		trie, err = statedb.NewTrie(common.Hash{}, sdb, nil)
 		if err != nil {
 			return err
 		}
 	}
 
-	var leafCount uint64
-	var innerCount uint64
-	var leafSize uint64
-	var innerSize uint64
-	var count uint64
-
-	counts := &counts{}
-	countsMu := &sync.RWMutex{}
-
-	startTime := time.Now()
-	mu := &sync.RWMutex{}
-	// use map to prevent adding up bytecode size for same code hash
-	codeHashMap := make(map[common.Hash]struct{})
-
-	innerSizeMap := make(map[uint64]uint64)
-	isMu := &sync.RWMutex{}
-	leafSizeMap := make(map[uint64]uint64)
-	lsMu := &sync.RWMutex{}
+	stat := &TotalStat{
+		accountStat:   &TrieStat{},
+		storageStat:   &TrieStat{},
+		storageBySize: make(map[uint64]*TrieStat),
+		codeHashes:    make(map[string]uint64),
+	}
 
 	var wg sync.WaitGroup
-	numRoutines := 16
-	ch := make(chan int, numRoutines)
-
-	/*
-		for i := 0; i < numRoutines; i++ {
-			wg.Add(1)
-			// divide 0x0 to 0xf into numRoutines parts
-			iterStart := []byte{byte(i * (0x10 / numRoutines))}
-			go func() {
-				defer wg.Done()
-				doIterTrie(iterStart, chainDB, db, trie, startTime, codeHashMap, mu, innerSizeMap, isMu, leafSizeMap, lsMu)
-			}()
-		}
-		wg.Wait()
-		return nil*/
-	iter := trie.NodeIterator([]byte{})
-	for iter.Next(true) {
-		count++
-		if count%10000 == 0 {
-			elapsed := time.Since(startTime)
-			fmt.Printf("path: %x, elapsed: %s\n", iter.Path(), elapsed)
-		}
-
-		// NOTE preorder traversal, print path in every 10000th iter then estimate total time
-		// if it takes too long, try with lower block number
-
-		//fmt.Printf("key: %x, val: %x\n", iter.Path(), iter.Hash())
-		if iter.Leaf() {
-			//fmt.Printf("leaf key: %x, val: %x\n", iter.LeafKey(), iter.LeafBlob())
-			leafCount++
-			blob := iter.LeafBlob()
-			leafSize += uint64(len(blob))
-
-			// check if block has contract account data
-			serializer := account.NewAccountSerializer()
-			if err := rlp.DecodeBytes(blob, serializer); err != nil {
-				logger.Error("Failed to decode state object", "err", err)
-				return nil
-			}
-			acc := serializer.GetAccount()
-			if acc.Type() != account.SmartContractAccountType {
-				continue
-			}
-			contract, true := acc.(*account.SmartContractAccount)
-			if !true {
-				return nil
-			}
-
-			// get storage root and code hash
-			storageRoot := contract.GetStorageRoot()
-			codeHashBytes := contract.GetCodeHash()
-			codeHash := common.BytesToHash(codeHashBytes)
-
-			wg.Add(1)
-			ch <- 1
-			go func() {
-				defer func() {
-					wg.Done()
-					<-ch
-				}()
-				doIterStorageTrie(storageRoot, codeHash, chainDB, db, startTime, codeHashMap, mu, innerSizeMap, isMu, leafSizeMap, lsMu, counts, countsMu)
-			}()
-		} else {
-			val, err := db.Get(iter.Hash().Bytes())
-			if err != nil {
-				fmt.Printf("err: %v, key: %x\n", err, iter.Hash())
-				return err
-			}
-			//fmt.Printf("key: %x, val: %x\n", iter.Hash(), val)
-			innerCount++
-			innerSize += uint64(len(val))
-		}
-		continue
-		/*
-			if bytes.Equal(iter.Hash().Bytes(), common.Hash{}.Bytes()) {
-				continue
-			}
-			val, err := db.Get(iter.Hash().Bytes())
-			if err != nil {
-				fmt.Printf("err: %v, key: %x\n", err, iter.Hash())
-				return err
-			}
-			fmt.Printf("key: %x, val: %x\n", iter.Hash(), val)
-			node, err := statedb.DecodeNode(iter.Hash().Bytes(), val)
-			if err != nil {
-				fmt.Printf("err: %v, key: %x\n", err, iter.Hash())
-				return err
-			}
-			fmt.Printf("node type: %v\n", reflect.TypeOf(node))*/
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			doIterFrom(i, chainDB.GetStateTrieDB(), sdb, trie, stat)
+		}()
 	}
 	wg.Wait()
 
-	fmt.Printf("leafCount: %d, innerCount: %d, leafSize: %d, innerSize: %d\n", leafCount, innerCount, leafSize, innerSize)
-	fmt.Printf("codeSize: %d\n", counts.codeSize)
-	fmt.Printf("strgLeafCount: %d, strgInnerCount: %d, strgLeafSize: %d, strgInnerSize: %d\n", counts.strgLeafCount, counts.strgInnerCount, counts.strgLeafSize, counts.strgInnerSize)
-	for k, v := range innerSizeMap {
-		fmt.Printf("innerSizeMap[%d]: %d\n", k, v)
+	for hash := range stat.codeHashes {
+		blob := chainDB.ReadCode(common.HexToHash(hash))
+		stat.codeHashes[hash] = uint64(len(blob))
+		stat.codeSize += uint64(len(blob))
 	}
-	for k, v := range leafSizeMap {
-		fmt.Printf("leafSizeMap[%d]: %d\n", k, v)
-	}
+	stat.codeHashes = nil // too much data will be spewed.
+	spew.Dump(stat)
+
+	/*
+		//var leafCount uint64
+		//var innerCount uint64
+		//var leafSize uint64
+		//var innerSize uint64
+		//var count uint64
+
+		//counts := &counts{}
+		//countsMu := &sync.RWMutex{}
+
+		startTime := time.Now()
+		mu := &sync.RWMutex{}
+		// use map to prevent adding up bytecode size for same code hash
+		codeHashMap := make(map[common.Hash]struct{})
+
+		innerSizeMap := make(map[uint64]uint64)
+		isMu := &sync.RWMutex{}
+		leafSizeMap := make(map[uint64]uint64)
+		lsMu := &sync.RWMutex{}
+
+		var wg sync.WaitGroup
+		numRoutines := 16
+		//ch := make(chan int, numRoutines)
+
+		for i := 0; i < numRoutines; i++ {
+			wg.Add(1)
+			// divide 0x0 to 0xf into numRoutines parts
+			//iterStart := []byte{byte(i * (0x100 / numRoutines))}
+			go func() {
+				defer wg.Done()
+				doIterTrie(byte(i*0x10), chainDB, db, trie, startTime, codeHashMap, mu, innerSizeMap, isMu, leafSizeMap, lsMu)
+			}()
+		}
+		wg.Wait()
+		//return nil
+		/*
+
+			iter := trie.NodeIterator([]byte{byte(0xa0)})
+			for iter.Next(true) {
+				count++
+				fmt.Printf("path: %x\n", iter.Path())
+				if count%10000 == 0 {
+					elapsed := time.Since(startTime)
+					fmt.Printf("path: %x, elapsed: %s\n", iter.Path(), elapsed)
+				}
+
+				// NOTE preorder traversal, print path in every 10000th iter then estimate total time
+				// if it takes too long, try with lower block number
+
+				//fmt.Printf("key: %x, val: %x\n", iter.Path(), iter.Hash())
+				if iter.Leaf() {
+					//fmt.Printf("leaf key: %x, val: %x\n", iter.LeafKey(), iter.LeafBlob())
+					leafCount++
+					blob := iter.LeafBlob()
+					leafSize += uint64(len(blob))
+
+					// check if block has contract account data
+					serializer := account.NewAccountSerializer()
+					if err := rlp.DecodeBytes(blob, serializer); err != nil {
+						logger.Error("Failed to decode state object", "err", err)
+						return nil
+					}
+					acc := serializer.GetAccount()
+					if acc.Type() != account.SmartContractAccountType {
+						continue
+					}
+					contract, true := acc.(*account.SmartContractAccount)
+					if !true {
+						return nil
+					}
+
+					// get storage root and code hash
+					storageRoot := contract.GetStorageRoot()
+					codeHashBytes := contract.GetCodeHash()
+					codeHash := common.BytesToHash(codeHashBytes)
+
+					wg.Add(1)
+					ch <- 1
+					go func() {
+						defer func() {
+							wg.Done()
+							<-ch
+						}()
+						doIterStorageTrie(storageRoot, codeHash, chainDB, db, startTime, codeHashMap, mu, innerSizeMap, isMu, leafSizeMap, lsMu, counts, countsMu)
+					}()
+				} else {
+					val, err := db.Get(iter.Hash().Bytes())
+					if err != nil {
+						fmt.Printf("err: %v, key: %x\n", err, iter.Hash())
+						return err
+					}
+					//fmt.Printf("key: %x, val: %x\n", iter.Hash(), val)
+					innerCount++
+					innerSize += uint64(len(val))
+				}
+				continue
+				/*
+					if bytes.Equal(iter.Hash().Bytes(), common.Hash{}.Bytes()) {
+						continue
+					}
+					val, err := db.Get(iter.Hash().Bytes())
+					if err != nil {
+						fmt.Printf("err: %v, key: %x\n", err, iter.Hash())
+						return err
+					}
+					fmt.Printf("key: %x, val: %x\n", iter.Hash(), val)
+					node, err := statedb.DecodeNode(iter.Hash().Bytes(), val)
+					if err != nil {
+						fmt.Printf("err: %v, key: %x\n", err, iter.Hash())
+						return err
+					}
+					fmt.Printf("node type: %v\n", reflect.TypeOf(node))
+			}
+		//wg.Wait()
+
+		//fmt.Printf("leafCount: %d, innerCount: %d, leafSize: %d, innerSize: %d\n", leafCount, innerCount, leafSize, innerSize)
+		//fmt.Printf("codeSize: %d\n", counts.codeSize)
+		//fmt.Printf("strgLeafCount: %d, strgInnerCount: %d, strgLeafSize: %d, strgInnerSize: %d\n", counts.strgLeafCount, counts.strgInnerCount, counts.strgLeafSize, counts.strgInnerSize)
+		for k, v := range innerSizeMap {
+			fmt.Printf("innerSizeMap[%d]: %d\n", k, v)
+		}
+		for k, v := range leafSizeMap {
+			fmt.Printf("leafSizeMap[%d]: %d\n", k, v)
+		}*/
 
 	return nil
 
+}
+
+// Iterate from [0x10*index, 0x10*(index+1))
+func doIterFrom(index int, db database.Database, sdb *statedb.Database, trie *statedb.Trie, stat *TotalStat) {
+	var (
+		startPrefix = byte(0x10 * index)
+		endPrefix   = byte(0x10 * (index + 1))
+	)
+
+	iter := trie.NodeIterator([]byte{startPrefix})
+	for iter.Next(true) {
+		path := iter.Path()
+		if len(path) > 0 && path[0] > endPrefix {
+			break
+		}
+
+		if iter.Leaf() {
+			blob := iter.LeafBlob()
+
+			// Record account leaf
+			stat.mu.Lock()
+			stat.accountStat.leafCount++
+			stat.accountStat.leafSize += uint64(len(blob))
+			stat.mu.Unlock()
+
+			// Iterate storage trie if exists
+			serializer := account.NewAccountSerializer()
+			if err := rlp.DecodeBytes(blob, serializer); err != nil {
+				fmt.Printf("Error decoding account blob=%x err=%v", blob, err)
+				return
+			}
+			acc := serializer.GetAccount()
+			if pacc := account.GetProgramAccount(acc); pacc != nil {
+				// Record code hash
+				codeHash := hexutil.Encode(pacc.GetCodeHash())
+				stat.mu.Lock()
+				stat.codeHashes[codeHash] = 0
+				stat.mu.Unlock()
+
+				// Iterate storage trie
+				doIterStorage(pacc.GetStorageRoot(), db, sdb, stat)
+			}
+
+		} else {
+			blob, err := db.Get(iter.Hash().Bytes())
+			if err != nil {
+				fmt.Printf("err db.Get(account midHash) hash=%x err=%v", iter.Hash(), err)
+			}
+
+			// Record account mid
+			stat.mu.Lock()
+			stat.accountStat.midCount++
+			stat.accountStat.midSize += uint64(len(blob))
+			stat.mu.Unlock()
+		}
+	}
+}
+
+func doIterStorage(storageRoot common.ExtHash, db database.Database, sdb *statedb.Database, stat *TotalStat) {
+	if storageRoot.Unextend() == emptyRoot {
+		return
+	}
+
+	trie, err := statedb.NewStorageTrie(storageRoot, sdb, nil)
+	if err != nil {
+		fmt.Printf("error opening storage trie err=%v", err)
+	}
+
+	currStat := &TrieStat{} // to be added to stat.storageStat AND stat.storageBySize[...]
+	iter := trie.NodeIterator(nil)
+	for iter.Next(true) {
+		if iter.Path() == nil || common.EmptyHash(iter.Hash()) {
+			continue
+		}
+
+		if iter.Leaf() {
+			blob := iter.LeafBlob()
+
+			// Record storage leaf
+			currStat.leafCount++
+			currStat.leafSize += uint64(len(blob))
+		} else {
+			blob, err := db.Get(iter.Hash().Bytes())
+			if err != nil {
+				fmt.Printf("err db.Get(storage midHash) hash=%x err=%v", iter.Hash(), err)
+			}
+
+			// Record storage mid
+			currStat.midCount++
+			currStat.midSize += uint64(len(blob))
+		}
+	}
+
+	sizeBucket := currStat.leafCount / 10
+
+	stat.mu.Lock()
+	stat.storageStat.Add(currStat)
+	if stat.storageBySize[sizeBucket] == nil {
+		stat.storageBySize[sizeBucket] = currStat
+	} else {
+		stat.storageBySize[sizeBucket].Add(currStat)
+	}
+	stat.mu.Unlock()
 }
 
 func doIterStorageTrie(storageRoot common.ExtHash, codeHash common.Hash, chainDB database.DBManager, db database.Database, startTime time.Time, codeHashMap map[common.Hash]struct{}, chMu *sync.RWMutex, innerSizeMap map[uint64]uint64, isMu *sync.RWMutex, leafSizeMap map[uint64]uint64, lsMu *sync.RWMutex, counts *counts, countsMu *sync.RWMutex) error {
@@ -504,7 +658,7 @@ func doIterStorageTrie(storageRoot common.ExtHash, codeHash common.Hash, chainDB
 	return nil
 }
 
-func doIterTrie(iterStart []byte, chainDB database.DBManager, db database.Database, trie *statedb.Trie, startTime time.Time, codeHashMap map[common.Hash]struct{}, chMu *sync.RWMutex, innerSizeMap map[uint64]uint64, isMu *sync.RWMutex, leafSizeMap map[uint64]uint64, lsMu *sync.RWMutex) error {
+func doIterTrie(iterStart byte, chainDB database.DBManager, db database.Database, trie *statedb.Trie, startTime time.Time, codeHashMap map[common.Hash]struct{}, chMu *sync.RWMutex, innerSizeMap map[uint64]uint64, isMu *sync.RWMutex, leafSizeMap map[uint64]uint64, lsMu *sync.RWMutex) error {
 	var accLeafCount uint64
 	var accInnerCount uint64
 	var accLeafSize uint64
@@ -515,8 +669,11 @@ func doIterTrie(iterStart []byte, chainDB database.DBManager, db database.Databa
 	var strgInnerSize uint64
 	var codeSize uint64
 	var count uint64
-	iter := trie.NodeIterator(iterStart)
+	iter := trie.NodeIterator([]byte{iterStart})
 	for iter.Next(true) {
+		if iter.Path()[0] > iterStart/0x10 {
+			break
+		}
 		count++
 		if count%10000 == 0 {
 			elapsed := time.Since(startTime)
