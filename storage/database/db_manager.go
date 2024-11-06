@@ -988,8 +988,9 @@ func (dbm *databaseManager) Close() {
 // Canonical Hash operations.
 // ReadCanonicalHash retrieves the hash assigned to a canonical block number.
 func (dbm *databaseManager) ReadCanonicalHash(number uint64) common.Hash {
+	// Temporary disable cache for storage study
 	if cached := dbm.cm.readCanonicalHashCache(number); !common.EmptyHash(cached) {
-		return cached
+		// return cached
 	}
 
 	db := dbm.getDatabase(headerDB)
@@ -999,7 +1000,7 @@ func (dbm *databaseManager) ReadCanonicalHash(number uint64) common.Hash {
 	}
 
 	hash := common.BytesToHash(data)
-	dbm.cm.writeCanonicalHashCache(number, hash)
+	// dbm.cm.writeCanonicalHashCache(number, hash)
 	return hash
 }
 

@@ -197,6 +197,38 @@ func dbGet(ctx *cli.Context) error {
 
 	// keyBytes = append(append([]byte("h"), common.Int64ToByteBigEndian(0)...), []byte("n")...)
 
+	// address book
+	// first transaction 1021409
+	// 128 multiple would be 1021440
+	// stateroot 0x965730f029c4017f252105a6dc8f59efcb0a78edd4e73c1b1bf58e87669ba2c7
+
+	// towards account address 0x0000000000000000000000000000000000000400
+	// secure account address 0xb6b2f533015b984fcca3017c4f65e78a2c013f37867ff35e58a7b7e801cefa7a
+
+	// key 0x965730f029c4017f252105a6dc8f59efcb0a78edd4e73c1b1bf58e87669ba2c7
+	// val extension node[0xb] = 867ae43d846631c26374bcaa918e6fa023eab8e222f4948d84bc3f80c77f000d
+
+	// key 0x867ae43d846631c26374bcaa918e6fa023eab8e222f4948d84bc3f80c77f000d
+	// val extension node[0x4] = 048cfacd231ca8142b5f4892b51ef21f8e6987d4005acf552ee5e7cb825cd6e4
+
+	// key 0x048cfacd231ca8142b5f4892b51ef21f8e6987d4005acf552ee5e7cb825cd6e4
+	// val extension node [0xb] = 02d5f909b9a30baaf329ad705632f8d1a75907b2f987f86cf48c5d203217db98
+
+	// key 0x02d5f909b9a30baaf329ad705632f8d1a75907b2f987f86cf48c5d203217db98
+	// val leaf node = 02f849c580808003c0a01f591f3165167de9239aa286740d80559397eba6863a1c38fb4f3d6bea6aab2ba06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980
+
+	// rlp decode = [["","","","03",[]],"1f591f3165167de9239aa286740d80559397eba6863a1c38fb4f3d6bea6aab2b","6c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f09",""]
+
+	// state root 0x1f591f3165167de9239aa286740d80559397eba6863a1c38fb4f3d6bea6aab2b
+	// towards slot index 0
+	// secure slot index 5380c7b7ae81a58eb98d9c78de4a1fd7fd9535fc953ed2be602daaa41767312a
+
+	// key 0x1f591f3165167de9239aa286740d80559397eba6863a1c38fb4f3d6bea6aab2b
+	// val extension node[0x5] = 67ab18c91017ae7efe795c8929b36c8d5299610de8737229c5e57a94d66b9540
+
+	// key 0x67ab18c91017ae7efe795c8929b36c8d5299610de8737229c5e57a94d66b9540
+	// val leaf node = 949c95f812f36ac26d7a9b2eac26eaaed11b2fc6bc
+
 	val, err := db.Get(keyBytes)
 	if err != nil {
 		return err
@@ -540,8 +572,9 @@ func doIterStorage(storageRoot common.ExtHash, db database.Database, sdb *stated
 	iter := trie.NodeIterator(nil)
 	for iter.Next(true) {
 		if iter.Path() == nil || common.EmptyHash(iter.Hash()) {
-			continue
+			//continue
 		}
+		fmt.Printf("root: 0x%x, path: %x, isLeaf: %v\n", storageRoot, iter.Path(), iter.Leaf())
 
 		if iter.Leaf() {
 			blob := iter.LeafBlob()
