@@ -125,6 +125,13 @@ The dumpgenesis command dumps the genesis block configuration in JSON format to 
 		Usage:     "Iterate over the trie and count the number of nodes by their types",
 		ArgsUsage: "",
 	}
+
+	IterCodeCommand = &cli.Command{
+		Action:    iterCode,
+		Name:      "itercode",
+		Usage:     "Iterate over the code and count the first byte of each code",
+		ArgsUsage: "",
+	}
 )
 
 func dbGet(ctx *cli.Context) error {
@@ -1010,6 +1017,139 @@ func doIterTrie(iterStart byte, chainDB database.DBManager, db database.Database
 	fmt.Printf("iterStart: 0x%x, codeSize: %d\n", iterStart, codeSize)
 
 	return nil
+}
+
+type CodeStat struct {
+	count map[byte]uint64
+	mu    sync.RWMutex
+}
+
+// iterCode gets the db name from the flag then iterates over the code and count the first byte of each code.
+// It prints the results to stdout.
+func iterCode(ctx *cli.Context) error {
+	dbName := ctx.Args().First()
+	if len(dbName) == 0 {
+		return fmt.Errorf("dbname is not set")
+	}
+
+	// Open an initialise both full and light databases
+	stack := MakeFullNode(ctx)
+	parallelDBWrite := !ctx.Bool(utils.NoParallelDBWriteFlag.Name)
+	singleDB := ctx.Bool(utils.SingleDBFlag.Name)
+	numStateTrieShards := ctx.Uint(utils.NumStateTrieShardsFlag.Name)
+
+	dbtype := database.DBType(ctx.String(utils.DbTypeFlag.Name)).ToValid()
+	if len(dbtype) == 0 {
+		logger.Crit("invalid dbtype", "dbtype", ctx.String(utils.DbTypeFlag.Name))
+	}
+	dbc := &database.DBConfig{
+		Dir: "chaindata", DBType: dbtype, ParallelDBWrite: parallelDBWrite,
+		SingleDB: singleDB, NumStateTrieShards: numStateTrieShards,
+		LevelDBCacheSize: 0, PebbleDBCacheSize: 0, OpenFilesLimit: 0,
+	}
+	chainDB := stack.OpenDatabase(dbc)
+	defer chainDB.Close()
+
+	dbEntryType := database.StateTrieDB
+	db := chainDB.GetDatabase(dbEntryType)
+	_ = db
+
+	sdb := statedb.NewDatabase(chainDB)
+	var trie *statedb.Trie
+	var err error
+	root := ctx.Args().Get(1)
+	fmt.Printf("stateRoot: %s\n", root)
+	if len(root) != 0 {
+		rootBuf, err := hexutil.Decode(root)
+		if err != nil {
+			return err
+		}
+		rootHash := common.BytesToHash(rootBuf)
+		trie, err = statedb.NewTrie(rootHash, sdb, nil)
+		if err != nil {
+			return err
+		}
+	} else {
+		trie, err = statedb.NewTrie(common.Hash{}, sdb, nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	stat := &CodeStat{
+		count: make(map[byte]uint64),
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			doIterCodeFrom(i, chainDB.GetStateTrieDB(), sdb, trie, stat)
+		}()
+	}
+	wg.Wait()
+
+	spew.Dump(stat)
+
+	return nil
+
+}
+
+// Iterate from [0x10*index, 0x10*(index+1))
+func doIterCodeFrom(index int, db database.Database, sdb *statedb.Database, trie *statedb.Trie, stat *CodeStat) {
+	var (
+		startPrefix = byte(0x10 * index)
+		endPrefix   = byte(0x10 * (index + 1))
+		count       = 0
+		startTime   = time.Now()
+	)
+
+	iter := trie.NodeIterator([]byte{startPrefix})
+	for iter.Next(true) {
+		path := iter.Path()
+		if len(path) > 0 && path[0]*0x10 >= endPrefix && startPrefix != 0xf0 {
+			fmt.Printf("[account] finished iter for startPrefix=%x path=%x\n", startPrefix, path)
+			break
+		}
+		//fmt.Printf("[acc] startPrefix: %x endPrefix: %x, path[0]: %x\n", startPrefix, endPrefix, path[0])
+
+		count++
+		if count%10000 == 0 {
+			elapsed := time.Since(startTime)
+			fmt.Printf("[account] startPrefix: %x, path: %x, elapsed: %s\n", startPrefix, iter.Path(), elapsed)
+			spew.Dump(stat)
+		}
+
+		if iter.Leaf() {
+			blob := iter.LeafBlob()
+
+			// Iterate storage trie if exists
+			serializer := account.NewAccountSerializer()
+			if err := rlp.DecodeBytes(blob, serializer); err != nil {
+				fmt.Printf("Error decoding account blob=%x err=%v", blob, err)
+				return
+			}
+			acc := serializer.GetAccount()
+			if pacc := account.GetProgramAccount(acc); pacc != nil {
+				// Record code hash
+				codeHashBytes := pacc.GetCodeHash()
+				//codeHash := common.BytesToHash(codeHashBytes)
+				//code := chainDB.ReadCode(common.HexToHash(codeHash))
+				code, err := db.Get(codeHashBytes)
+				if err != nil {
+					fmt.Printf("err db.Get(codeHash) hash=%x err=%v\n", codeHashBytes, err)
+					continue
+				}
+
+				stat.mu.Lock()
+				stat.count[code[0]]++
+				stat.mu.Unlock()
+
+			}
+
+		}
+	}
 }
 
 // initGenesis will initialise the given JSON format genesis file and writes it as
