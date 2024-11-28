@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -331,6 +332,7 @@ func iterTrie(ctx *cli.Context) error {
 	var trie *statedb.Trie
 	var err error
 	root := ctx.Args().Get(1)
+	fmt.Printf("stateRoot: %s\n", root)
 	if len(root) != 0 {
 		rootBuf, err := hexutil.Decode(root)
 		if err != nil {
@@ -355,6 +357,8 @@ func iterTrie(ctx *cli.Context) error {
 		codeHashes:    make(map[string]uint64),
 	}
 
+	//doIter(chainDB.GetStateTrieDB(), sdb, trie, stat)
+
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
@@ -372,6 +376,18 @@ func iterTrie(ctx *cli.Context) error {
 	}
 	stat.codeHashes = nil // too much data will be spewed.
 	spew.Dump(stat)
+
+	keys := make([]int, 0, len(stat.storageBySize))
+	for k := range stat.storageBySize {
+		keys = append(keys, int(k))
+	}
+	// print sorted
+	sort.Ints(keys)
+
+	for _, k := range keys {
+		s := stat.storageBySize[uint64(k)]
+		fmt.Println(k*10, float64(s.midSize)/float64(s.midSize+s.leafSize))
+	}
 
 	/*
 		//var leafCount uint64
@@ -502,18 +518,94 @@ func iterTrie(ctx *cli.Context) error {
 
 }
 
+func doIter(db database.Database, sdb *statedb.Database, trie *statedb.Trie, stat *TotalStat) {
+	var (
+		count     = 0
+		startTime = time.Now()
+	)
+
+	iter := trie.NodeIterator([]byte{})
+	for iter.Next(true) {
+		count++
+		if count%10000 == 0 {
+			elapsed := time.Since(startTime)
+			fmt.Printf("[account] path: %x, elapsed: %s\n", iter.Path(), elapsed)
+		}
+
+		if iter.Leaf() {
+			blob := iter.LeafBlob()
+
+			// Record account leaf
+			//stat.mu.Lock()
+			stat.accountStat.leafCount++
+			stat.accountStat.leafSize += uint64(len(blob))
+			//stat.mu.Unlock()
+
+			// Iterate storage trie if exists
+			serializer := account.NewAccountSerializer()
+			if err := rlp.DecodeBytes(blob, serializer); err != nil {
+				fmt.Printf("Error decoding account blob=%x err=%v", blob, err)
+				return
+			}
+			acc := serializer.GetAccount()
+			if pacc := account.GetProgramAccount(acc); pacc != nil {
+				// Record code hash
+				codeHash := hexutil.Encode(pacc.GetCodeHash())
+				//stat.mu.Lock()
+				stat.codeHashes[codeHash] = 0
+				//stat.mu.Unlock()
+
+				// Iterate storage trie
+				doIterStorage(pacc.GetStorageRoot(), db, sdb, stat)
+				/*var wg sync.WaitGroup
+				for i := 0; i < 16; i++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						doIterStorageFrom(i, pacc.GetStorageRoot(), db, sdb, stat)
+					}()
+				}
+				wg.Wait()*/
+			}
+
+		} else {
+			blob, err := db.Get(iter.Hash().Bytes())
+			if err != nil {
+				//fmt.Printf("err db.Get(account midHash) hash=%x err=%v iterError=%v path=%x\n", iter.Hash(), err, iter.Error(), iter.Path())
+				continue
+			}
+
+			// Record account mid
+			//stat.mu.Lock()
+			stat.accountStat.midCount++
+			stat.accountStat.midSize += uint64(len(blob))
+			//stat.mu.Unlock()
+		}
+	}
+}
+
 // Iterate from [0x10*index, 0x10*(index+1))
 func doIterFrom(index int, db database.Database, sdb *statedb.Database, trie *statedb.Trie, stat *TotalStat) {
 	var (
 		startPrefix = byte(0x10 * index)
 		endPrefix   = byte(0x10 * (index + 1))
+		count       = 0
+		startTime   = time.Now()
 	)
 
 	iter := trie.NodeIterator([]byte{startPrefix})
 	for iter.Next(true) {
 		path := iter.Path()
-		if len(path) > 0 && path[0] > endPrefix {
+		if len(path) > 0 && path[0]*0x10 >= endPrefix && startPrefix != 0xf0 {
+			fmt.Printf("[account] finished iter for startPrefix=%x path=%x\n", startPrefix, path)
 			break
+		}
+		//fmt.Printf("[acc] startPrefix: %x endPrefix: %x, path[0]: %x\n", startPrefix, endPrefix, path[0])
+
+		count++
+		if count%10000 == 0 {
+			elapsed := time.Since(startTime)
+			fmt.Printf("[account] startPrefix: %x, path: %x, elapsed: %s\n", startPrefix, iter.Path(), elapsed)
 		}
 
 		if iter.Leaf() {
@@ -541,12 +633,22 @@ func doIterFrom(index int, db database.Database, sdb *statedb.Database, trie *st
 
 				// Iterate storage trie
 				doIterStorage(pacc.GetStorageRoot(), db, sdb, stat)
+				/*var wg sync.WaitGroup
+				for i := 0; i < 16; i++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						doIterStorageFrom(i, pacc.GetStorageRoot(), db, sdb, stat)
+					}()
+				}
+				wg.Wait()*/
 			}
 
 		} else {
 			blob, err := db.Get(iter.Hash().Bytes())
 			if err != nil {
-				fmt.Printf("err db.Get(account midHash) hash=%x err=%v", iter.Hash(), err)
+				//fmt.Printf("err db.Get(account midHash) hash=%x err=%v iterError=%v path=%x\n", iter.Hash(), err, iter.Error(), iter.Path())
+				continue
 			}
 
 			// Record account mid
@@ -556,6 +658,77 @@ func doIterFrom(index int, db database.Database, sdb *statedb.Database, trie *st
 			stat.mu.Unlock()
 		}
 	}
+}
+
+func doIterStorageFrom(index int, storageRoot common.ExtHash, db database.Database, sdb *statedb.Database, stat *TotalStat) {
+	var (
+		startPrefix = byte(0x10 * index)
+		endPrefix   = byte(0x10 * (index + 1))
+		count       = 0
+		startTime   = time.Now()
+	)
+
+	if storageRoot.Unextend() == emptyRoot {
+		return
+	}
+
+	trie, err := statedb.NewStorageTrie(storageRoot, sdb, nil)
+	//trie, err := statedb.NewTrie(storageRoot.Unextend(), sdb, nil)
+	if err != nil {
+		fmt.Printf("error opening storage trie err=%v", err)
+	}
+
+	currStat := &TrieStat{} // to be added to stat.storageStat AND stat.storageBySize[...]
+	iter := trie.NodeIterator([]byte{startPrefix})
+	for iter.Next(true) {
+		path := iter.Path()
+		if len(path) > 0 && path[0]*0x10 >= endPrefix {
+			//fmt.Printf("endPrifix: %x, path[0]: %x\n", endPrefix, path[0])
+			break
+		}
+		//fmt.Printf("[str] startPrefix: %x endPrefix: %x, path[0]: %x\n", startPrefix, endPrefix, path[0])
+
+		count++
+		if count%10000 == 0 {
+			elapsed := time.Since(startTime)
+			fmt.Printf("[storage] root: %x, startPrefix: %x, path: %x, elapsed: %s\n", storageRoot.Unextend().Bytes(), startPrefix, iter.Path(), elapsed)
+		}
+
+		if iter.Path() == nil || common.EmptyHash(iter.Hash()) {
+			//continue
+		}
+		//fmt.Printf("root: 0x%x, path: %x, hash: %x, isLeaf: %v\n", storageRoot, iter.Path(), iter.Hash(), iter.Leaf())
+
+		if iter.Leaf() {
+			//fmt.Printf("leaf key: %x\n", iter.LeafKey())
+			blob := iter.LeafBlob()
+
+			// Record storage leaf
+			currStat.leafCount++
+			currStat.leafSize += uint64(len(blob))
+		} else {
+			blob, err := db.Get(iter.Hash().Bytes())
+			if err != nil {
+				//fmt.Printf("err db.Get(storage midHash) hash=%x err=%v iterError=%v path=%x\n", iter.Hash(), err, iter.Error(), iter.Path())
+				continue
+			}
+
+			// Record storage mid
+			currStat.midCount++
+			currStat.midSize += uint64(len(blob))
+		}
+	}
+
+	sizeBucket := currStat.leafCount / 10
+
+	stat.mu.Lock()
+	stat.storageStat.Add(currStat)
+	if stat.storageBySize[sizeBucket] == nil {
+		stat.storageBySize[sizeBucket] = currStat
+	} else {
+		stat.storageBySize[sizeBucket].Add(currStat)
+	}
+	stat.mu.Unlock()
 }
 
 func doIterStorage(storageRoot common.ExtHash, db database.Database, sdb *statedb.Database, stat *TotalStat) {
@@ -574,9 +747,10 @@ func doIterStorage(storageRoot common.ExtHash, db database.Database, sdb *stated
 		if iter.Path() == nil || common.EmptyHash(iter.Hash()) {
 			//continue
 		}
-		fmt.Printf("root: 0x%x, path: %x, isLeaf: %v\n", storageRoot, iter.Path(), iter.Leaf())
+		//fmt.Printf("root: 0x%x, path: %x, hash: %x, isLeaf: %v\n", storageRoot, iter.Path(), iter.Hash(), iter.Leaf())
 
 		if iter.Leaf() {
+			//fmt.Printf("leaf key: %x\n", iter.LeafKey())
 			blob := iter.LeafBlob()
 
 			// Record storage leaf
@@ -585,7 +759,8 @@ func doIterStorage(storageRoot common.ExtHash, db database.Database, sdb *stated
 		} else {
 			blob, err := db.Get(iter.Hash().Bytes())
 			if err != nil {
-				fmt.Printf("err db.Get(storage midHash) hash=%x err=%v", iter.Hash(), err)
+				//fmt.Printf("err db.Get(storage midHash) hash=%x err=%v iterError=%v path=%x\n", iter.Hash(), err, iter.Error(), iter.Path())
+				continue
 			}
 
 			// Record storage mid
