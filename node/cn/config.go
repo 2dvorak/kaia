@@ -128,6 +128,7 @@ type Config struct {
 	TriesInMemory        uint64
 	LivePruning          bool
 	LivePruningRetention uint64
+	UseErigonScheme      bool
 	SenderTxHashIndexing bool
 	ParallelDBWrite      bool
 	TrieNodeCacheConfig  statedb.TrieNodeCacheConfig

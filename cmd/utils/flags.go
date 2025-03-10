@@ -557,6 +557,13 @@ var (
 		EnvVars:  []string{"KLAYTN_STATE_LIVE_PRUNING_RETENTION", "KAIA_STATE_LIVE_PRUNING_RETENTION"},
 		Category: "STATE",
 	}
+	UseErigonSchemeFlag = &cli.BoolFlag{
+		Name:     "state.use-erigon-scheme",
+		Usage:    "Use Erigon scheme for state trie",
+		Aliases:  []string{},
+		EnvVars:  []string{"KLAYTN_STATE_USE_ERIGON_SCHEME", "KAIA_STATE_USE_ERIGON_SCHEME"},
+		Category: "STATE",
+	}
 	CacheTypeFlag = &cli.IntFlag{
 		Name:     "cache.type",
 		Usage:    "Cache Type: 0=LRUCache, 1=LRUShardCache, 2=FIFOCache",

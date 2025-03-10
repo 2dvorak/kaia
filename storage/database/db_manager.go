@@ -34,6 +34,7 @@ import (
 	"github.com/dgraph-io/badger"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
+
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
@@ -186,6 +187,11 @@ type DBManager interface {
 	PruneTrieNodes(marks []PruningMark)
 	WriteLastPrunedBlockNumber(blockNumber uint64)
 	ReadLastPrunedBlockNumber() (uint64, error)
+
+	// Erigon scheme
+	ReadErigonSchemeEnabled() bool
+	WriteErigonSchemeEnabled()
+	DeleteErigonSchemeEnabled()
 
 	// from accessors_indexes.go
 	ReadTxLookupEntry(hash common.Hash) (common.Hash, uint64, uint64)
@@ -2123,6 +2129,26 @@ func (dbm *databaseManager) ReadLastPrunedBlockNumber() (uint64, error) {
 		return 0, err
 	}
 	return binary.LittleEndian.Uint64(lastPruned), nil
+}
+
+// ReadErigonSchemeEnabled reads if the Erigon scheme flag is stored in database.
+func (dbm *databaseManager) ReadErigonSchemeEnabled() bool {
+	ok, _ := dbm.getDatabase(MiscDB).Has(erigonSchemeEnabledKey)
+	return ok
+}
+
+// WriteErigonSchemeEnabled writes the Erigon scheme flag to the database.
+func (dbm *databaseManager) WriteErigonSchemeEnabled() {
+	if err := dbm.getDatabase(MiscDB).Put(erigonSchemeEnabledKey, []byte("42")); err != nil {
+		logger.Crit("Failed to store Erigon scheme enabled flag", "err", err)
+	}
+}
+
+// DeleteErigonSchemeEnabled deletes the Erigon scheme flag.
+func (dbm *databaseManager) DeleteErigonSchemeEnabled() {
+	if err := dbm.getDatabase(MiscDB).Delete(erigonSchemeEnabledKey); err != nil {
+		logger.Crit("Failed to remove Erigon scheme enabled flag", "err", err)
+	}
 }
 
 // ReadTxLookupEntry retrieves the positional metadata associated with a transaction
