@@ -16,8 +16,23 @@
 
 package impl
 
-import "github.com/kaiachain/kaia/blockchain/types"
+import (
+	"bytes"
+
+	"github.com/kaiachain/kaia/blockchain/types"
+	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/rlp"
+)
 
 func (k *FlatKVModule) PostInsertBlock(block *types.Block) error {
+	key := append(common.Int64ToByteBigEndian(block.NumberU64()), block.Hash().Bytes()...)
+	io := bytes.NewBuffer(nil)
+	if err := rlp.Encode(io, block.Header()); err != nil {
+		return err
+	}
+	value := io.Bytes()
+	if err := k.Put(key, value); err != nil {
+		return err
+	}
 	return nil
 }

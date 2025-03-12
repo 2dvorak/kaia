@@ -23,11 +23,16 @@
 package nodecmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"path"
 	"strings"
 
+	"github.com/erigontech/erigon-lib/kv"
+	mdbx2 "github.com/erigontech/erigon-lib/kv/mdbx"
 	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/cmd/utils"
@@ -94,7 +99,59 @@ It expects the genesis file as argument.`,
 		Description: `
 The dumpgenesis command dumps the genesis block configuration in JSON format to stdout.`,
 	}
+
+	KvDumpCommand = &cli.Command{
+		Action:    kvDump,
+		Name:      "kvdump",
+		Usage:     "Dumps genesis block JSON configuration to stdout",
+		ArgsUsage: "",
+		Flags: []cli.Flag{
+			utils.MainnetFlag,
+			utils.KairosFlag,
+		},
+		Category: "BLOCKCHAIN COMMANDS",
+		Description: `
+The kvdump command dumps the kv database.`,
+	}
 )
+
+func kvDump(ctx *cli.Context) error {
+	const ThreadsHardLimit = 9_000
+	const chaindataDir = "klay/chaindata/kv"
+	chaindb := mdbx2.MustOpen(path.Join(ctx.String(utils.DataDirFlag.Name), chaindataDir))
+	defer chaindb.Close()
+
+	tx, err := chaindb.BeginRo(context.Background())
+	if err != nil {
+		logger.Crit("Failed to begin read-only transaction", "err", err)
+	}
+	defer tx.Rollback()
+
+	all := chaindb.AllTables()
+
+	for table, _ := range all {
+		fmt.Printf("table %s\n", table)
+
+		chaindb.View(ctx.Context, func(tx kv.Tx) error {
+			stream, err := tx.Range(table, nil, nil)
+			if err != nil {
+				logger.Error("Failed to range table", "table", table, "err", err)
+				return err
+			}
+			for stream.HasNext() {
+				k, v, err := stream.Next()
+				if err != nil {
+					logger.Error("Failed to get next", "table", table, "err", err)
+					return err
+				}
+				fmt.Printf("key=0x%-40x, val=0x%-40x\n", k, v)
+			}
+			return nil
+		})
+	}
+
+	return nil
+}
 
 // initGenesis will initialise the given JSON format genesis file and writes it as
 // the zero'd block (i.e. genesis) or will fail hard if it can't succeed.

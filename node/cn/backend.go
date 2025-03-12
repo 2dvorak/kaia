@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path"
 	"runtime"
 	"sync"
 	"time"
@@ -45,6 +46,7 @@ import (
 	"github.com/kaiachain/kaia/datasync/downloader"
 	"github.com/kaiachain/kaia/event"
 	"github.com/kaiachain/kaia/kaiax"
+	flatkv_impl "github.com/kaiachain/kaia/kaiax/flatkv/impl"
 	"github.com/kaiachain/kaia/kaiax/gov"
 	gov_impl "github.com/kaiachain/kaia/kaiax/gov/impl"
 	randao_impl "github.com/kaiachain/kaia/kaiax/randao/impl"
@@ -494,6 +496,7 @@ func (s *CN) SetupKaiaxModules() error {
 		mGov     = gov_impl.NewGovModule()
 		mValset  = valset_impl.NewValsetModule()
 		mRandao  = randao_impl.NewRandaoModule()
+		mFlatKV  = flatkv_impl.NewFlatKVModule()
 	)
 
 	// Initialize modules
@@ -533,6 +536,9 @@ func (s *CN) SetupKaiaxModules() error {
 			Chain:       s.blockchain,
 			Downloader:  s.protocolManager.Downloader(),
 		}),
+		mFlatKV.Init(&flatkv_impl.InitOpts{
+			DataDir: path.Join(s.chainDB.GetDBConfig().Dir, "kv"),
+		}),
 	)
 	if err != nil {
 		return err
@@ -540,11 +546,11 @@ func (s *CN) SetupKaiaxModules() error {
 
 	// Register modules to respective components
 	// TODO-kaiax: Organize below lines.
-	s.RegisterBaseModules(mStaking, mReward, mSupply, mGov, mValset, mRandao)
+	s.RegisterBaseModules(mStaking, mReward, mSupply, mGov, mValset, mRandao, mFlatKV)
 	s.RegisterJsonRpcModules(mStaking, mReward, mSupply, mGov, mRandao)
-	s.miner.RegisterExecutionModule(mStaking, mSupply, mGov, mValset, mRandao)
-	s.blockchain.RegisterExecutionModule(mStaking, mSupply, mGov, mValset, mRandao)
-	s.blockchain.RegisterRewindableModule(mStaking, mSupply, mGov, mValset, mRandao)
+	s.miner.RegisterExecutionModule(mStaking, mSupply, mGov, mValset, mRandao, mFlatKV)
+	s.blockchain.RegisterExecutionModule(mStaking, mSupply, mGov, mValset, mRandao, mFlatKV)
+	s.blockchain.RegisterRewindableModule(mStaking, mSupply, mGov, mValset, mRandao, mFlatKV)
 	if engine, ok := s.engine.(consensus.Istanbul); ok {
 		engine.RegisterKaiaxModules(mGov, mStaking, mValset, mRandao)
 		engine.RegisterConsensusModule(mReward, mGov)

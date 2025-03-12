@@ -18,28 +18,38 @@ package impl
 
 import (
 	"context"
+	"errors"
 
 	"github.com/erigontech/erigon-lib/kv"
 )
 
 func (k *FlatKVModule) Get(key []byte) ([]byte, error) {
+	if k.chaindb == nil {
+		return nil, errors.New("chaindb is nil")
+	}
 	var ret []byte
 	err := k.chaindb.View(context.Background(), func(tx kv.Tx) error {
 		var err error
-		ret, err = tx.GetOne("Headers", key)
+		ret, err = tx.GetOne("Header", key)
 		return err
 	})
 	return ret, err
 }
 
 func (k *FlatKVModule) Put(key []byte, value []byte) error {
+	if k.chaindb == nil {
+		return errors.New("chaindb is nil")
+	}
 	return k.chaindb.Update(context.Background(), func(tx kv.RwTx) error {
-		return tx.Put("Headers", key, value)
+		return tx.Put("Header", key, value)
 	})
 }
 
 func (k *FlatKVModule) Delete(key []byte) error {
+	if k.chaindb == nil {
+		return errors.New("chaindb is nil")
+	}
 	return k.chaindb.Update(context.Background(), func(tx kv.RwTx) error {
-		return tx.Delete("Headers", key)
+		return tx.Delete("Header", key)
 	})
 }
