@@ -213,6 +213,232 @@ func TestStateObjects(t *testing.T) {
 	assert.Equal(t, 128, len(stateDB.stateObjects))
 }
 
+func genRandomBytes(length int) []byte {
+	array := make([]byte, length)
+	for i := 0; i < length; i++ {
+		array[i] = byte(rand.Intn(256))
+	}
+	return array
+}
+
+func TestGetStateRoot(t *testing.T) {
+	dbm := database.NewMemoryDBManager()
+	db := NewDatabaseWithNewCache(dbm, statedb.GetEmptyTrieNodeCacheConfig())
+	stateDB, _ := New(common.Hash{}, db, nil, nil)
+
+	sc, err := statedb.NewSecureTrie(common.Hash{}, statedb.NewDatabase(database.NewMemoryDBManager()), nil)
+	assert.NoError(t, err)
+
+	addr := common.BytesToAddress(genRandomBytes(32))
+	aa := addr
+	stateObj := stateDB.GetOrNewStateObject(addr)
+	stateObj.SetBalance(big.NewInt(100))
+	stateDB.updateStateObject(stateObj)
+	value, err := stateDB.trie.TryGet(addr.Bytes())
+	assert.NoError(t, err)
+	fmt.Printf("key: %x, value: %x\n", addr.Bytes(), value)
+	root, err := stateDB.Commit(false)
+	assert.NoError(t, err)
+	fmt.Printf("root: %x\n", root)
+	sc.TryUpdate(addr.Bytes(), value)
+	root2, err := sc.Commit(nil)
+	assert.NoError(t, err)
+	assert.Equal(t, root, root2)
+	//fmt.Printf("root2: %x\n", root2)
+
+	addr = common.BytesToAddress(genRandomBytes(32))
+	stateObj = stateDB.GetOrNewStateObject(addr)
+	stateObj.SetNonce(200)
+	stateDB.updateStateObject(stateObj)
+	value, err = stateDB.trie.TryGet(addr.Bytes())
+	assert.NoError(t, err)
+	fmt.Printf("key: %x, value: %x\n", addr.Bytes(), value)
+	root, err = stateDB.Commit(false)
+	assert.NoError(t, err)
+	fmt.Printf("root: %x\n", root)
+	sc.TryUpdate(addr.Bytes(), value)
+	root2, err = sc.Commit(nil)
+	assert.NoError(t, err)
+	assert.Equal(t, root, root2)
+	//fmt.Printf("root2: %x\n", root2)
+
+	// WHY SetState won't work?
+
+	addr = common.BytesToAddress(genRandomBytes(32))
+	stateObj = stateDB.GetOrNewStateObject(addr)
+	code := genRandomBytes(30)
+	stateObj.SetCode(crypto.Keccak256Hash(code), code)
+	stateDB.updateStateObject(stateObj)
+	value, err = stateDB.trie.TryGet(addr.Bytes())
+	assert.NoError(t, err)
+	fmt.Printf("key: %x, value: %x\n", addr.Bytes(), value)
+	root, err = stateDB.Commit(false)
+	assert.NoError(t, err)
+	fmt.Printf("root: %x\n", root)
+	err = sc.TryUpdate(addr.Bytes(), value)
+	assert.NoError(t, err)
+	root2, err = sc.Commit(nil)
+	assert.NoError(t, err)
+	assert.Equal(t, root, root2)
+	//fmt.Printf("root2: %x\n", root2)
+
+	addr = common.BytesToAddress(genRandomBytes(32))
+	stateObj = stateDB.GetOrNewStateObject(addr)
+	stateObj.SetNonce(400)
+	stateObj.SetBalance(big.NewInt(400))
+	stateDB.updateStateObject(stateObj)
+	value, err = stateDB.trie.TryGet(addr.Bytes())
+	assert.NoError(t, err)
+	fmt.Printf("key: %x, value: %x\n", addr.Bytes(), value)
+	root, err = stateDB.Commit(false)
+	assert.NoError(t, err)
+	fmt.Printf("root: %x\n", root)
+	sc.TryUpdate(addr.Bytes(), value)
+	root2, err = sc.Commit(nil)
+	assert.NoError(t, err)
+	assert.Equal(t, root, root2)
+	//fmt.Printf("root2: %x\n", root2)
+
+	addr = common.BytesToAddress(genRandomBytes(32))
+	stateObj = stateDB.GetOrNewStateObject(addr)
+	code = genRandomBytes(100)
+	stateObj.SetNonce(500)
+	stateObj.SetCode(crypto.Keccak256Hash(code), code)
+	stateDB.updateStateObject(stateObj)
+	value, err = stateDB.trie.TryGet(addr.Bytes())
+	assert.NoError(t, err)
+	fmt.Printf("key: %x, value: %x\n", addr.Bytes(), value)
+	root, err = stateDB.Commit(false)
+	assert.NoError(t, err)
+	fmt.Printf("root: %x\n", root)
+	sc.TryUpdate(addr.Bytes(), value)
+	root2, err = sc.Commit(nil)
+	assert.NoError(t, err)
+	assert.Equal(t, root, root2)
+	//fmt.Printf("root2: %x\n", root2)
+
+	addr = common.BytesToAddress(genRandomBytes(32))
+	stateObj = stateDB.GetOrNewStateObject(addr)
+	code = genRandomBytes(60)
+	stateObj.SetBalance(big.NewInt(600))
+	stateObj.SetCode(crypto.Keccak256Hash(code), code)
+	stateDB.updateStateObject(stateObj)
+	value, err = stateDB.trie.TryGet(addr.Bytes())
+	assert.NoError(t, err)
+	fmt.Printf("key: %x, value: %x\n", addr.Bytes(), value)
+	root, err = stateDB.Commit(false)
+	assert.NoError(t, err)
+	fmt.Printf("root: %x\n", root)
+	sc.TryUpdate(addr.Bytes(), value)
+	root2, err = sc.Commit(nil)
+	assert.NoError(t, err)
+	assert.Equal(t, root, root2)
+	//fmt.Printf("root2: %x\n", root2)
+
+	addr = common.BytesToAddress(genRandomBytes(32))
+	stateObj = stateDB.GetOrNewStateObject(addr)
+	code = genRandomBytes(70)
+	stateObj.SetNonce(700)
+	stateObj.SetBalance(big.NewInt(700))
+	stateObj.SetCode(crypto.Keccak256Hash(code), code)
+	stateDB.updateStateObject(stateObj)
+	value, err = stateDB.trie.TryGet(addr.Bytes())
+	assert.NoError(t, err)
+	fmt.Printf("key: %x, value: %x\n", addr.Bytes(), value)
+	root, err = stateDB.Commit(false)
+	assert.NoError(t, err)
+	fmt.Printf("root: %x\n", root)
+	sc.TryUpdate(addr.Bytes(), value)
+	root2, err = sc.Commit(nil)
+	assert.NoError(t, err)
+	assert.Equal(t, root, root2)
+
+	addr = common.BytesToAddress(genRandomBytes(32))
+	stateObj = stateDB.GetOrNewStateObject(addr)
+	code = genRandomBytes(80)
+	stateObj.SetNonce(800)
+	stateObj.SetBalance(big.NewInt(800))
+	stateObj.SetCode(crypto.Keccak256Hash(code), code)
+	stateDB.updateStateObject(stateObj)
+	value, err = stateDB.trie.TryGet(addr.Bytes())
+	assert.NoError(t, err)
+	fmt.Printf("key: %x, value: %x\n", addr.Bytes(), value)
+	root, err = stateDB.Commit(false)
+	assert.NoError(t, err)
+	fmt.Printf("root: %x\n", root)
+	sc.TryUpdate(addr.Bytes(), value)
+	root2, err = sc.Commit(nil)
+	assert.NoError(t, err)
+	assert.Equal(t, root, root2)
+
+	addr = common.BytesToAddress(genRandomBytes(32))
+	stateObj = stateDB.GetOrNewStateObject(addr)
+	stateObj.SetNonce(900)
+	stateObj.SetBalance(big.NewInt(900))
+	stateDB.updateStateObject(stateObj)
+	value, err = stateDB.trie.TryGet(addr.Bytes())
+	assert.NoError(t, err)
+	fmt.Printf("key: %x, value: %x\n", addr.Bytes(), value)
+	root, err = stateDB.Commit(false)
+	assert.NoError(t, err)
+	fmt.Printf("root: %x\n", root)
+	sc.TryUpdate(addr.Bytes(), value)
+	root2, err = sc.Commit(nil)
+	assert.NoError(t, err)
+	assert.Equal(t, root, root2)
+
+	addr = common.BytesToAddress(genRandomBytes(32))
+	stateObj = stateDB.GetOrNewStateObject(addr)
+	stateObj.SetNonce(1000)
+	stateObj.SetBalance(big.NewInt(1000))
+	stateDB.updateStateObject(stateObj)
+	value, err = stateDB.trie.TryGet(addr.Bytes())
+	assert.NoError(t, err)
+	fmt.Printf("key: %x, value: %x\n", addr.Bytes(), value)
+	root, err = stateDB.Commit(false)
+	assert.NoError(t, err)
+	fmt.Printf("root: %x\n", root)
+	sc.TryUpdate(addr.Bytes(), value)
+	root2, err = sc.Commit(nil)
+	assert.NoError(t, err)
+	assert.Equal(t, root, root2)
+
+	value, err = stateDB.trie.TryGet(aa.Bytes())
+	assert.NoError(t, err)
+	fmt.Printf("key: %x, value: %x\n", aa.Bytes(), value)
+
+	t.Fatal("stop here")
+}
+
+func TestTest(t *testing.T) {
+	items := []struct {
+		key   []byte
+		value []byte
+		root  []byte
+	}{
+		{common.Hex2Bytes("861d291691e0f281725e2dd064840dffe1638a3d"), common.Hex2Bytes("01c580648001c0"), common.Hex2Bytes("e092c6a631b07f1c545cf0a8af205b5e3f5d75efbe2468f8e21da73e62a5fa20")},
+		{common.Hex2Bytes("97cc5901a4bcac8709873e822cb3cd09d9850149"), common.Hex2Bytes("01c681c8808001c0"), common.Hex2Bytes("3b249c93abdceea28dd142a047bec2c2a0b81a5d800954c51dfe961f44d8d211")},
+		{common.Hex2Bytes("1662765d2ceba9f770c5d6f6234c858ba0ea0ef7"), common.Hex2Bytes("01f849c580808001c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0e8d7126540aba1c3c13c85dc51de31325f7e8ded89c740e2c7e9c6c0aa7c120780"), common.Hex2Bytes("15465c598aa96ccd801ec7193abacb7440f973e2a9d7477eead0b90508bf6453")},
+		{common.Hex2Bytes("c24d279ce0ff65909ec546f510035c5567aea850"), common.Hex2Bytes("01c98201908201908001c0"), common.Hex2Bytes("95f67a7689a602e8eeeaef5503cb3a3478ca6b2936c482dd4e6eec64a2b6ce1a")},
+		{common.Hex2Bytes("9a8aa6170b92beabcbe2b3fa93b9c412ee336675"), common.Hex2Bytes("01f84bc78201f4808001c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a03f7a2cb21e08acfa5093bf4ccb8ed4ee6bcfa2d7751d1835e901fe5fd33c51e080"), common.Hex2Bytes("62fa051debc8821be6e24bcefc6277c408694012074399f6057aa1a248f853fb")},
+		{common.Hex2Bytes("223dcdd20a646c627c15a0f6e16d5ab30b72a752"), common.Hex2Bytes("01f84bc7808202588001c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a039760af7fa7005bdd3d8f9f04b346ee2ca9d5143ac9bba9f9cdac7c9db60b50f80"), common.Hex2Bytes("a5e40ce7df2d44fcd95ec0b7f3ee59b9d4d99c10894a4fd100a38905f6d45d45")},
+		{common.Hex2Bytes("e6e21213a857c239cbcf29d6d9b2105c7f076c69"), common.Hex2Bytes("01f84dc98202bc8202bc8001c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a08b3b7865853f70ae6bade383e506517b713521904649258422966ea4cf74678280"), common.Hex2Bytes("3e7ec8b786b42b8d0259b1ef3e5e8d8cc220b8ad787c2cbd87ed6cb56c4ddd7d")},
+		{common.Hex2Bytes("50c4c1c3cad84553d1d753698ab5a5f5be115e1b"), common.Hex2Bytes("01f84dc98203208203208001c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0aa6f0397dc26e7560c9158ee0f5312d3e2cb429f4a16b92b368149f79dc2da9b80"), common.Hex2Bytes("47d6d1a603886d68e4ef7d86a5ab38a3faa19df25a8a5a57cd9e7b32e905f45f")},
+		{common.Hex2Bytes("077e8de24947dd0dd466adfe0b317392973f6813"), common.Hex2Bytes("01c98203848203848001c0"), common.Hex2Bytes("dc1ff718fc1f11b826bf0e60f8a46fe1c2e5536ff31accba5b0126c53ceeb412")},
+		{common.Hex2Bytes("2e76e1b378a74558a74c92c4bdb05f561dd2663d"), common.Hex2Bytes("01c98203e88203e88001c0"), common.Hex2Bytes("1a0ed6a889e684d81a132cd53310cf602ea0fac31383b26b36ba48cf8f264530")},
+	}
+
+	trie, err := statedb.NewSecureTrie(common.Hash{}, statedb.NewDatabase(database.NewMemoryDBManager()), nil)
+	assert.NoError(t, err)
+	for _, item := range items {
+
+		trie.TryUpdate(item.key, item.value)
+		root, err := trie.Commit(nil)
+		assert.NoError(t, err)
+		assert.Equal(t, item.root, root.Bytes())
+	}
+}
+
 // TestCopiedEIP7702 tests that copied EOA has the same code related fields as the original EOA.
 // This test has been introduced since the implementation of EIP-7702.
 func TestCopiedEIP7702(t *testing.T) {

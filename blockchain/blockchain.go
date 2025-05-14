@@ -749,7 +749,7 @@ func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
 // PrunableStateAt returns a new mutable state based on a particular point in time.
 // If live pruning is enabled on the databse, and num is nonzero, then trie will mark obsolete nodes for pruning.
 func (bc *BlockChain) PrunableStateAt(root common.Hash, num uint64) (*state.StateDB, error) {
-	if bc.IsLivePruningRequired() {
+	if bc.IsLivePruningRequired() || common.FlatTrie {
 		return state.New(root, bc.stateCache, bc.snaps, &statedb.TrieOpts{
 			PruningBlockNumber: num,
 		})
