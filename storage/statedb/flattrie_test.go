@@ -264,21 +264,50 @@ func TestTest(t *testing.T) {
 		{common.Hex2Bytes("5d76c9950b78dcfa47ec195f56d11a4afa8708f3"), common.Hex2Bytes("01f84dc98202588202588001c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a02a5787ab5c11885b8b30f1a3aea5c05d48e17eb18f94210555e34a3a965b655a80"), common.Hex2Bytes("1f359a878bdea26f8eecaa6b6fff8306b870d4b3b18871975aebc68f12c8ea51")},
 	}
 
-	var trie *SecureTrie
-	var err error
+	trie, err := NewSecureTrie(common.Hash{}, NewDatabase(database.NewMemoryDBManager()), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	flatTrie := newEmptyFlatTrie()
 	for _, item := range items {
-		trie, err = NewSecureTrie(common.Hash{}, NewDatabase(database.NewMemoryDBManager()), nil)
-		if err != nil {
-			t.Errorf("expected nil got %v", err)
-		}
 		err = trie.TryUpdate(item.key, item.value)
 		if err != nil {
 			t.Errorf("expected nil got %v", err)
 		}
+		err = flatTrie.TryUpdate(item.key, item.value)
+		if err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		hash1, err := trie.Commit(nil)
+		if err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		hash2, err := flatTrie.Commit(nil)
+		if err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		if !bytes.Equal(hash1.Bytes(), hash2.Bytes()) {
+			t.Errorf("expected %x got %x", hash1, hash2)
+		}
 	}
 	root := trie.Hash()
 	fmt.Printf("root: %x\n", root)
-	fmt.Printf("item.root: %x\n", items[0].root)
+	t.Fatal("stop here")
+}
+
+func TestKairos(t *testing.T) {
+	trie := newEmptyFlatTrie()
+	trie.TryUpdate(common.Hex2Bytes("0000000000000000000000000000000000000400"), common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"))
+	trie.TryUpdate(common.Hex2Bytes("4937a6f664630547f6b0c3c235c4f03a64ca36b1"), common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0"))
+
+	sc, _ := NewSecureTrie(common.Hash{}, NewDatabase(database.NewMemoryDBManager()), nil)
+	sc.TryUpdate(common.Hex2Bytes("0000000000000000000000000000000000000400"), common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"))
+	sc.TryUpdate(common.Hex2Bytes("4937a6f664630547f6b0c3c235c4f03a64ca36b1"), common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0"))
+
+	root := trie.Hash()
+	root2 := sc.Hash()
+	fmt.Printf("root: %x\n", root)
+	fmt.Printf("root2: %x\n", root2)
 	t.Fatal("stop here")
 }
 

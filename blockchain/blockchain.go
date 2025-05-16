@@ -299,6 +299,7 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 	// Make sure the state associated with the block is available
 	head := bc.CurrentBlock()
 	if _, err := state.New(head.Root(), bc.stateCache, bc.snaps, nil); err != nil {
+		fmt.Printf("loadLastState: head: %x, err: %v\n", head.Hash(), err)
 		// Head state is missing, before the state recovery, find out the
 		// disk layer point of snapshot(if it's enabled). Make sure the
 		// rewound point is lower than disk layer.
@@ -319,6 +320,7 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 				bc.db.WriteSnapshotRecoveryNumber(snapDisk)
 			}
 		} else {
+			fmt.Printf("loadLastState: head: %x, diskRoot: %x\n", head.Hash(), diskRoot)
 			// Dangling block without a state associated, init from scratch
 			logger.Warn("Head state missing, repairing chain",
 				"number", head.NumberU64(), "hash", head.Hash().String())
@@ -449,6 +451,7 @@ func (bc *BlockChain) getProcInterrupt() bool {
 func (bc *BlockChain) loadLastState() error {
 	// Restore the last known head block
 	head := bc.db.ReadHeadBlockHash()
+	fmt.Printf("loadLastState: head: %x\n", head)
 	if head == (common.Hash{}) {
 		// Corrupt or empty database, init from scratch
 		logger.Info("Empty database, resetting chain")
@@ -477,9 +480,11 @@ func (bc *BlockChain) loadLastState() error {
 
 	// Restore the last known head header
 	currentHeader := currentBlock.Header()
+	fmt.Printf("loadLastState: currentHeader: %v\n", currentHeader)
 	if head := bc.db.ReadHeadHeaderHash(); head != (common.Hash{}) {
 		if header := bc.GetHeaderByHash(head); header != nil {
 			currentHeader = header
+			fmt.Printf("loadLastState: currentHeader = header: %x\n", currentHeader.Hash())
 		}
 	}
 	bc.hc.SetCurrentHeader(currentHeader)
@@ -743,6 +748,7 @@ func (bc *BlockChain) State() (*state.StateDB, error) {
 
 // StateAt returns a new mutable state based on a particular point in time.
 func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
+	// error: MDBX_THREAD_MISMATCH
 	return state.New(root, bc.stateCache, bc.snaps, nil)
 }
 

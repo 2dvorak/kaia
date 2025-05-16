@@ -128,6 +128,7 @@ type StateDB struct {
 func New(root common.Hash, db Database, snaps *snapshot.Tree, opts *statedb.TrieOpts) (*StateDB, error) {
 	tr, err := db.OpenTrie(root, opts)
 	if err != nil {
+		fmt.Printf("New: OpenTrie: %v\n", err)
 		return nil, err
 	}
 	sdb := &StateDB{

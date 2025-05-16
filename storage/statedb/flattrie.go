@@ -18,12 +18,11 @@ package statedb
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/big"
 	"path"
-	"strings"
+	"sync"
 
 	"github.com/erigontech/erigon-lib/commitment"
 	"github.com/erigontech/erigon-lib/common/datadir"
@@ -32,12 +31,8 @@ import (
 	"github.com/erigontech/erigon-lib/kv/mdbx"
 	"github.com/erigontech/erigon-lib/kv/temporal"
 	erigon_state "github.com/erigontech/erigon-lib/state"
-	"github.com/holiman/uint256"
-	"github.com/kaiachain/kaia/blockchain/types"
-	"github.com/kaiachain/kaia/blockchain/types/accountkey"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/crypto"
-	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/storage/database"
 )
 
@@ -128,6 +123,7 @@ var (
 	StorageSetPrefix        = []byte("StorageSet")
 	AccountPrefix           = []byte("Account")
 	StoragePrefix           = []byte("Storage")
+	terminatorHexByte       = byte(16) // max nibble value +1. Defines end of nibble line in the trie
 )
 
 var (
@@ -136,6 +132,8 @@ var (
 )
 
 var temporaryMdbx erigon_kv.RwDB
+var rwtx erigon_kv.RwTx
+var mu sync.RWMutex
 
 func init() {
 	var err error
@@ -143,6 +141,24 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+
+	dirs := datadir.New(path.Join("/tmp", "flatdata"))
+	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, config3.DefaultStepSize, temporaryMdbx, nil)
+	if err != nil {
+		panic(err)
+	}
+	if err := agg.OpenFolder(); err != nil {
+		panic(err)
+	}
+	tempdb, err := temporal.New(temporaryMdbx, agg)
+	if err != nil {
+		panic(err)
+	}
+	rwtx, err = tempdb.BeginRw(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	mu = sync.RWMutex{}
 }
 
 // FlatTrie is not safe for concurrent use.
@@ -164,6 +180,19 @@ type FlatTrie struct {
 	diff map[string][]byte
 }
 
+func NewFlatTrie3(kv erigon_kv.RwTx) (*FlatTrie, error) {
+	sd, err := erigon_state.NewSharedDomains(kv, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &FlatTrie{
+		sd:  sd,
+		tx:  kv,
+		hph: sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed),
+		num: big.NewInt(0),
+	}, nil
+}
+
 func NewFlatTrie2(db *Database, opts *TrieOpts) (*FlatTrie, error) {
 	if opts == nil {
 		opts = &TrieOpts{PruningBlockNumber: 0}
@@ -181,52 +210,23 @@ func NewFlatTrie2(db *Database, opts *TrieOpts) (*FlatTrie, error) {
 	t.sd = sd
 	t.hph = t.sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
 
-	/*
-		mdbx, err := mdbx.NewTemporaryMdbx(context.Background(), "/tmp")
-		if err != nil {
-			return nil, err
-		}
-		dirs := datadir.New("temp-flatkv")
-		agg, err := erigon_state.NewAggregator2(context.Background(), dirs, config3.DefaultStepSize, mdbx, nil)
-		if err != nil {
-			return nil, err
-		}
-		if err := agg.OpenFolder(); err != nil {
-			panic(err)
-		}
-		tempdb, err := temporal.New(mdbx, agg)
-		if err != nil {
-			panic(err)
-		}
-		tx, err := tempdb.BeginRw(context.Background())
-		if err != nil {
-			return nil, err
-		}
-		t.sd, err = erigon_state.NewSharedDomains(tx, nil)
-		if err != nil {
-			return nil, err
-		}
-		t.hph = t.sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
-		//t.hph = NewHexPatriciaHashed(common.AddressLength, nil, "/tmp", t.sd)
-		//t.hph.ResetContext(t.sd.GetCommitmentContext())
-	*/
-
 	return t, nil
 }
 
 // baseDir shall be $DATA_DIR/klay/chaindata
 func openDB(baseDir string) (*erigon_state.SharedDomains, error) {
 	/*
-		opts := mdbx.New(erigon_kv.ChainDB, nil)
+		opts := mdbx.New(erigon_kv.ChainDB, nil).
+			Accede(true)
 		opts = opts.Path(path.Join(baseDir, "flatstate")) // flatstate, flatdata 둘 중 하나는 상관없을지도?
 		db, err := opts.Open(context.Background())
 		if err != nil {
 			return nil, err
-		}
-	*/
-	db := temporaryMdbx
+		}*/
 
-	dirs := datadir.New(path.Join(baseDir, "flatdata"))
+	//db := temporaryMdbx
+
+	/*dirs := datadir.New(path.Join(baseDir, "flatdata"))
 	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, config3.DefaultStepSize, db, nil)
 	if err != nil {
 		return nil, err
@@ -241,8 +241,8 @@ func openDB(baseDir string) (*erigon_state.SharedDomains, error) {
 	tx, err := tempdb.BeginRw(context.Background())
 	if err != nil {
 		return nil, err
-	}
-	return erigon_state.NewSharedDomains(tx, nil)
+	}*/
+	return erigon_state.NewSharedDomains(rwtx, nil)
 }
 
 func NewFlatTrie(db database.Database, opts *TrieOpts) (*FlatTrie, error) {
@@ -285,6 +285,7 @@ func NewFlatTrie(db database.Database, opts *TrieOpts) (*FlatTrie, error) {
 	if err != nil {
 		return nil, err
 	}
+	t.sd.GetCommitmentContext().Reset()
 	t.hph = t.sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
 	//t.hph = NewHexPatriciaHashed(common.AddressLength, nil, "/tmp", t.sd)
 	//t.hph.ResetContext(t.sd.GetCommitmentContext())
@@ -329,8 +330,10 @@ func (t *FlatTrie) TryGet(key []byte) ([]byte, error) {
 		return it.Value(), nil
 	}
 	return nil, ErrNotFound*/
-	fmt.Printf("TryGet: %x\n", key)
+	mu.RLock()
+	defer mu.RUnlock()
 	val, _, err := t.sd.GetLatest(erigon_kv.AccountsDomain, key)
+	fmt.Printf("TryGet: %x, %x, %v\n", key, val, err)
 	if err != nil {
 		return nil, err
 	}
@@ -359,6 +362,9 @@ func (t *FlatTrie) TryUpdate(key, value []byte) error {
 	//storageByte
 	return nil*/
 
+	mu.Lock()
+	defer mu.Unlock()
+	fmt.Printf("TryUpdate: %x, %x\n", key, value)
 	return t.sd.DomainPut(erigon_kv.AccountsDomain, key, nil, value, nil, 0)
 }
 
@@ -420,7 +426,8 @@ func (t *FlatTrie) Hash() common.Hash {
 	/*if t.hash != (common.Hash{}) {
 		return t.hash
 	}*/
-	hash, err := t.sd.ComputeCommitment(context.Background(), true, t.num.Uint64(), "asdf")
+	//hash, err := t.sd.ComputeCommitment(context.Background(), true, t.num.Uint64(), "asdf")
+	hash, err := t.sd.ComputeCommitmentWithoutReset(context.Background(), false, t.num.Uint64(), "asdf")
 	//hash, err := t.sd.GetCommitmentContext().Trie().Process(context.Background(), t.sd.GetUpdates(), "FlatTrie.Hash")
 	if err != nil {
 		logger.Error("FlatTrie Hash ComputeCommitment error", "err", err)
@@ -522,7 +529,7 @@ func (t *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) {
 	t.num = t.num.Add(t.num, big.NewInt(1))
 	t.diff = make(map[string][]byte)
 	return t.hash, nil*/
-	hash, err := t.sd.ComputeCommitment(context.Background(), true, t.num.Uint64(), "asdf")
+	hash, err := t.sd.ComputeCommitmentWithoutReset(context.Background(), true, t.num.Uint64(), "asdf")
 	if err != nil {
 		return common.Hash{}, err
 	}
@@ -534,7 +541,110 @@ func (t *FlatTrie) CommitExt(cb LeafCallback) (common.ExtHash, error) {
 }
 
 func (t *FlatTrie) NodeIterator(startKey []byte) NodeIterator {
-	panic("not implemented")
+	// Create a new iterator that wraps the HexPatriciaHashed trie
+	return newFlatTrieIterator(t, startKey)
+}
+
+// flatTrieIterator implements NodeIterator interface for FlatTrie
+type flatTrieIterator struct {
+	trie     *FlatTrie
+	path     []byte
+	hash     common.Hash
+	parent   common.Hash
+	err      error
+	keyBuf   []byte
+	valueBuf []byte
+}
+
+func newFlatTrieIterator(trie *FlatTrie, start []byte) *flatTrieIterator {
+	it := &flatTrieIterator{
+		trie: trie,
+		path: keybytesToHex(start),
+	}
+	// Remove terminator byte
+	if len(it.path) > 0 {
+		it.path = it.path[:len(it.path)-1]
+	}
+	return it
+}
+
+func (it *flatTrieIterator) Hash() common.Hash {
+	return it.hash
+}
+
+func (it *flatTrieIterator) Parent() common.Hash {
+	return it.parent
+}
+
+func (it *flatTrieIterator) Path() []byte {
+	return it.path
+}
+
+func (it *flatTrieIterator) Leaf() bool {
+	return hasTerm(it.path)
+}
+
+func (it *flatTrieIterator) LeafKey() []byte {
+	if !it.Leaf() {
+		panic("not at leaf")
+	}
+	return hexToKeybytes(it.path)
+}
+
+func (it *flatTrieIterator) LeafBlob() []byte {
+	if !it.Leaf() {
+		panic("not at leaf")
+	}
+	return it.valueBuf
+}
+
+func (it *flatTrieIterator) LeafProof() [][]byte {
+	if !it.Leaf() {
+		panic("not at leaf")
+	}
+	// TODO: Implement proof generation if needed
+	return nil
+}
+
+func (it *flatTrieIterator) Error() error {
+	if it.err == iteratorEnd {
+		return nil
+	}
+	return it.err
+}
+
+func (it *flatTrieIterator) Next(descend bool) bool {
+	if it.err != nil {
+		return false
+	}
+
+	// Get the next key-value pair from the underlying HexPatriciaHashed
+	key := it.path
+	if len(key) == 0 {
+		key = make([]byte, 1)
+	}
+
+	// Get the next entry from the trie
+	val, _, err := it.trie.sd.GetLatest(erigon_kv.AccountsDomain, key)
+	if err != nil {
+		it.err = err
+		return false
+	}
+	if val == nil {
+		it.err = iteratorEnd
+		return false
+	}
+
+	// Update iterator state
+	it.keyBuf = key
+	it.valueBuf = val
+	it.path = append(it.path, terminatorHexByte) // Mark as leaf node
+
+	return true
+}
+
+func (it *flatTrieIterator) AddResolver(resolver database.DBManager) {
+	// Not needed for FlatTrie
 }
 
 func (t *FlatTrie) Prove(key []byte, fromLevel uint, proofDb database.DBManager) error {
@@ -632,6 +742,7 @@ func (t *FlatTrie) Copy() *FlatTrie {
 	}
 }
 
+/*
 type FlatKVIterator struct {
 	db database.Database
 	it database.Iterator
@@ -690,228 +801,4 @@ func (it *FlatKVIterator) LeafProof() [][]byte {
 
 func (it *FlatKVIterator) AddResolver(database.DBManager) {
 }
-
-type KeyUpdate struct {
-	plainKey  string
-	hashedKey []byte
-	update    *Update
-}
-
-func keyUpdateLessFn(i, j *KeyUpdate) bool {
-	return i.plainKey < j.plainKey
-}
-
-type UpdateFlags uint8
-
-const (
-	CodeUpdate          UpdateFlags = 1
-	DeleteUpdate        UpdateFlags = 2
-	BalanceUpdate       UpdateFlags = 4
-	NonceUpdate         UpdateFlags = 8
-	StorageUpdate       UpdateFlags = 16
-	AccountKeyUpdate    UpdateFlags = 32
-	HumanReadableUpdate UpdateFlags = 64
-	CodeInfoUpdate      UpdateFlags = 128
-)
-
-func (uf UpdateFlags) String() string {
-	var sb strings.Builder
-	if uf&DeleteUpdate != 0 {
-		sb.WriteString("Delete")
-	}
-	if uf&BalanceUpdate != 0 {
-		sb.WriteString("+Balance")
-	}
-	if uf&NonceUpdate != 0 {
-		sb.WriteString("+Nonce")
-	}
-	if uf&CodeUpdate != 0 {
-		sb.WriteString("+Code")
-	}
-	if uf&StorageUpdate != 0 {
-		sb.WriteString("+Storage")
-	}
-	if uf&AccountKeyUpdate != 0 {
-		sb.WriteString("+AccountKey")
-	}
-	if uf&HumanReadableUpdate != 0 {
-		sb.WriteString("+HumanReadable")
-	}
-	if uf&CodeInfoUpdate != 0 {
-		sb.WriteString("+CodeInfo")
-	}
-	return sb.String()
-}
-
-type Update struct {
-	Nonce        uint64
-	Balance      uint256.Int
-	HumanBalance bool
-	Key          accountkey.AccountKey
-	Storage      [common.HashLength]byte
-	StorageLen   int
-	CodeHash     [common.HashLength]byte
-	CodeInfo     params.CodeInfo
-	Flags        UpdateFlags
-}
-
-func (u *Update) Reset() {
-	u.Flags = 0
-	u.Balance.Clear()
-	u.Nonce = 0
-	u.StorageLen = 0
-	u.CodeHash = types.EmptyCodeHash
-	u.CodeInfo = params.CodeInfo(0)
-	u.Key = nil
-	u.HumanBalance = false
-}
-
-func (u *Update) Merge(b *Update) {
-	if b.Flags == DeleteUpdate {
-		u.Flags = DeleteUpdate
-		return
-	}
-	if b.Flags&BalanceUpdate != 0 {
-		u.Flags |= BalanceUpdate
-		u.Balance.Set(&b.Balance)
-	}
-	if b.Flags&NonceUpdate != 0 {
-		u.Flags |= NonceUpdate
-		u.Nonce = b.Nonce
-	}
-	if b.Flags&CodeUpdate != 0 {
-		u.Flags |= CodeUpdate
-		copy(u.CodeHash[:], b.CodeHash[:])
-	}
-	if b.Flags&StorageUpdate != 0 {
-		u.Flags |= StorageUpdate
-		copy(u.Storage[:], b.Storage[:b.StorageLen])
-		u.StorageLen = b.StorageLen
-	}
-	if b.Flags&AccountKeyUpdate != 0 {
-		u.Flags |= AccountKeyUpdate
-		u.Key = b.Key
-	}
-	if b.Flags&HumanReadableUpdate != 0 {
-		u.Flags |= HumanReadableUpdate
-		u.HumanBalance = b.HumanBalance
-	}
-	if b.Flags&CodeInfoUpdate != 0 {
-		u.Flags |= CodeInfoUpdate
-		u.CodeInfo = b.CodeInfo
-	}
-}
-
-func (u *Update) Encode(buf []byte, numBuf []byte) []byte {
-	buf = append(buf, byte(u.Flags))
-	if u.Flags&BalanceUpdate != 0 {
-		buf = append(buf, byte(u.Balance.ByteLen()))
-		buf = append(buf, u.Balance.Bytes()...)
-	}
-	if u.Flags&NonceUpdate != 0 {
-		n := binary.PutUvarint(numBuf, u.Nonce)
-		buf = append(buf, numBuf[:n]...)
-	}
-	if u.Flags&CodeUpdate != 0 {
-		buf = append(buf, u.CodeHash[:]...)
-	}
-	if u.Flags&StorageUpdate != 0 {
-		n := binary.PutUvarint(numBuf, uint64(u.StorageLen))
-		buf = append(buf, numBuf[:n]...)
-		if u.StorageLen > 0 {
-			buf = append(buf, u.Storage[:u.StorageLen]...)
-		}
-	}
-	return buf
-}
-
-func (u *Update) Deleted() bool {
-	return u.Flags&DeleteUpdate > 0
-}
-
-func (u *Update) Decode(buf []byte, pos int) (int, error) {
-	if len(buf) < pos+1 {
-		return 0, errors.New("decode Update: buffer too small for flags")
-	}
-	u.Reset()
-
-	u.Flags = UpdateFlags(buf[pos])
-	pos++
-	if u.Flags&BalanceUpdate != 0 {
-		if len(buf) < pos+1 {
-			return 0, errors.New("decode Update: buffer too small for balance len")
-		}
-		balanceLen := int(buf[pos])
-		pos++
-		if len(buf) < pos+balanceLen {
-			return 0, errors.New("decode Update: buffer too small for balance")
-		}
-		u.Balance.SetBytes(buf[pos : pos+balanceLen])
-		pos += balanceLen
-	}
-	if u.Flags&NonceUpdate != 0 {
-		var n int
-		u.Nonce, n = binary.Uvarint(buf[pos:])
-		if n == 0 {
-			return 0, errors.New("decode Update: buffer too small for nonce")
-		}
-		if n < 0 {
-			return 0, errors.New("decode Update: nonce overflow")
-		}
-		pos += n
-	}
-	if u.Flags&CodeUpdate != 0 {
-		if len(buf) < pos+common.HashLength {
-			return 0, errors.New("decode Update: buffer too small for codeHash")
-		}
-		copy(u.CodeHash[:], buf[pos:pos+common.HashLength])
-		pos += common.HashLength
-	}
-	if u.Flags&StorageUpdate != 0 {
-		l, n := binary.Uvarint(buf[pos:])
-		if n == 0 {
-			return 0, errors.New("decode Update: buffer too small for storage len")
-		}
-		if n < 0 {
-			return 0, errors.New("decode Update: storage pos overflow")
-		}
-		pos += n
-		if len(buf) < pos+int(l) {
-			return 0, errors.New("decode Update: buffer too small for storage")
-		}
-		u.StorageLen = int(l)
-		copy(u.Storage[:], buf[pos:pos+u.StorageLen])
-		pos += u.StorageLen
-	}
-	return pos, nil
-}
-
-func (u *Update) String() string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Flags: [%s]", u.Flags))
-	if u.Deleted() {
-		sb.WriteString(", DELETED")
-	}
-	if u.Flags&BalanceUpdate != 0 {
-		sb.WriteString(fmt.Sprintf(", Balance: [%d]", &u.Balance))
-	}
-	if u.Flags&NonceUpdate != 0 {
-		sb.WriteString(fmt.Sprintf(", Nonce: [%d]", u.Nonce))
-	}
-	if u.Flags&CodeUpdate != 0 {
-		sb.WriteString(fmt.Sprintf(", CodeHash: [%x]", u.CodeHash))
-	}
-	if u.Flags&StorageUpdate != 0 {
-		sb.WriteString(fmt.Sprintf(", Storage: [%x]", u.Storage[:u.StorageLen]))
-	}
-	if u.Flags&AccountKeyUpdate != 0 {
-		sb.WriteString(fmt.Sprintf(", AccountKey: [%x]", u.Key))
-	}
-	if u.Flags&HumanReadableUpdate != 0 {
-		sb.WriteString(fmt.Sprintf(", HumanReadable: [%t]", u.HumanBalance))
-	}
-	if u.Flags&CodeInfoUpdate != 0 {
-		sb.WriteString(fmt.Sprintf(", CodeInfo: [%x]", u.CodeInfo))
-	}
-	return sb.String()
-}
+*/

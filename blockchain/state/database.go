@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 
+	erigon_kv "github.com/erigontech/erigon-lib/kv"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/lru"
 	"github.com/kaiachain/kaia/storage/database"
@@ -143,6 +144,7 @@ func getCodeSizeCache() common.Cache {
 func NewDatabaseWithNewCache(db database.DBManager, cacheConfig *statedb.TrieNodeCacheConfig) Database {
 	return &cachingDB{
 		db:            statedb.NewDatabaseWithNewCache(db, cacheConfig),
+		tx:            statedb.NewTx(db),
 		codeSizeCache: getCodeSizeCache(),
 		codeCache:     lru.NewSizeConstrainedCache[common.Hash, []byte](codeCacheSize),
 	}
@@ -154,6 +156,7 @@ func NewDatabaseWithNewCache(db database.DBManager, cacheConfig *statedb.TrieNod
 func NewDatabaseWithExistingCache(db database.DBManager, cache statedb.TrieNodeCache) Database {
 	return &cachingDB{
 		db:            statedb.NewDatabaseWithExistingCache(db, cache),
+		tx:            statedb.NewTx(db),
 		codeSizeCache: getCodeSizeCache(),
 		codeCache:     lru.NewSizeConstrainedCache[common.Hash, []byte](codeCacheSize),
 	}
@@ -161,6 +164,7 @@ func NewDatabaseWithExistingCache(db database.DBManager, cache statedb.TrieNodeC
 
 type cachingDB struct {
 	db            *statedb.Database
+	tx            erigon_kv.RwTx
 	codeSizeCache common.Cache
 	codeCache     *lru.SizeConstrainedCache[common.Hash, []byte]
 }
@@ -169,7 +173,8 @@ type cachingDB struct {
 func (db *cachingDB) OpenTrie(root common.Hash, opts *statedb.TrieOpts) (Trie, error) {
 	// 요걸 NewFlatTrie로 바꿨을 때 statedb_test.go 가 잘 돌아가야됨.
 	if common.FlatTrie {
-		return statedb.NewFlatTrie2(db.db, opts)
+		//return statedb.NewFlatTrie2(db.db, opts)
+		return statedb.NewFlatTrie3(db.tx)
 	} else {
 		return statedb.NewSecureTrie(root, db.db, opts)
 	}

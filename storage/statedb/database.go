@@ -23,6 +23,7 @@
 package statedb
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	erigon_kv "github.com/erigontech/erigon-lib/kv"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/rlp"
@@ -329,6 +331,41 @@ func NewDatabaseWithExistingCache(diskDB database.DBManager, cache TrieNodeCache
 		preimages:     make(map[common.Hash][]byte),
 		trieNodeCache: cache,
 	}
+}
+
+func NewTx(diskDB database.DBManager) erigon_kv.RwTx {
+	/*flatDB := diskDB.GetFlatDB()
+	dirs := datadir.New(path.Join("/tmp", "flatdata"))
+	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, config3.DefaultStepSize, temporaryMdbx, nil)
+	if err != nil {
+		panic(err)
+	}
+	if err := agg.OpenFolder(); err != nil {
+		panic(err)
+	}
+	tempdb, err := temporal.New(flatDB, agg)
+	if err != nil {
+		panic(err)
+	}
+	rwtx, err = tempdb.BeginRw(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	return rwtx*/
+	//return diskDB.GetRWTx()
+	//rwtx, err := diskDB.GetFlatDB().BeginRw(context.Background())
+	rwtx, err := diskDB.GetFlatDB().BeginRw(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	//rwtx.Rollback()
+	//rwtx.Commit()
+	// open twice immediately, see if fails
+	_, err = diskDB.GetFlatDB().BeginRw(context.Background())
+	if err != nil {
+		//	panic(err)
+	}
+	return rwtx
 }
 
 func getTrieNodeCacheSizeMiB() int {

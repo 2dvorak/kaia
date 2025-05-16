@@ -20,11 +20,13 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -32,9 +34,16 @@ import (
 	"sync"
 
 	"github.com/dgraph-io/badger"
+	"github.com/erigontech/erigon-lib/common/datadir"
+	config3 "github.com/erigontech/erigon-lib/config3"
+	erigon_kv "github.com/erigontech/erigon-lib/kv"
+	"github.com/erigontech/erigon-lib/kv/mdbx"
+	temporal "github.com/erigontech/erigon-lib/kv/temporal"
+	erigon_log "github.com/erigontech/erigon-lib/log/v3"
+	erigon_state "github.com/erigontech/erigon-lib/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
-	"github.com/kaiachain/kaia/log"
+	kaia_log "github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/pkg/errors"
@@ -42,10 +51,51 @@ import (
 )
 
 var (
-	logger = log.NewModuleLogger(log.StorageDatabase)
+	logger = kaia_log.NewModuleLogger(kaia_log.StorageDatabase)
 
 	errGovIdxAlreadyExist = errors.New("a governance idx of the more recent or the same block exist")
+)
 
+// logWrapper adapts Kaia's logger to Erigon's logger interface
+type logWrapper struct{ kaia kaia_log.Logger }
+
+func (l *logWrapper) GetHandler() erigon_log.Handler { return &handlerWrapper{l.kaia.GetHandler()} }
+func (l *logWrapper) SetHandler(h erigon_log.Handler) {
+	if hw, ok := h.(*handlerWrapper); ok {
+		l.kaia.SetHandler(hw.kaia)
+	}
+}
+func (l *logWrapper) New(ctx ...interface{}) erigon_log.Logger { return &logWrapper{l.kaia} }
+func (l *logWrapper) Log(lvl erigon_log.Lvl, msg string, ctx ...interface{}) {
+	switch lvl {
+	case erigon_log.LvlTrace:
+		l.kaia.Trace(msg, ctx...)
+	case erigon_log.LvlDebug:
+		l.kaia.Debug(msg, ctx...)
+	case erigon_log.LvlInfo:
+		l.kaia.Info(msg, ctx...)
+	case erigon_log.LvlWarn:
+		l.kaia.Warn(msg, ctx...)
+	case erigon_log.LvlError:
+		l.kaia.Error(msg, ctx...)
+	case erigon_log.LvlCrit:
+		l.kaia.Crit(msg, ctx...)
+	}
+}
+func (l *logWrapper) Trace(msg string, ctx ...interface{}) { l.kaia.Trace(msg, ctx...) }
+func (l *logWrapper) Debug(msg string, ctx ...interface{}) { l.kaia.Debug(msg, ctx...) }
+func (l *logWrapper) Info(msg string, ctx ...interface{})  { l.kaia.Info(msg, ctx...) }
+func (l *logWrapper) Warn(msg string, ctx ...interface{})  { l.kaia.Warn(msg, ctx...) }
+func (l *logWrapper) Error(msg string, ctx ...interface{}) { l.kaia.Error(msg, ctx...) }
+func (l *logWrapper) Crit(msg string, ctx ...interface{})  { l.kaia.Crit(msg, ctx...) }
+
+type handlerWrapper struct{ kaia kaia_log.Handler }
+
+func (h *handlerWrapper) Log(r *erigon_log.Record) error {
+	return h.kaia.Log(&kaia_log.Record{Time: r.Time, Lvl: kaia_log.Lvl(r.Lvl), Msg: r.Msg, Ctx: r.Ctx})
+}
+
+var (
 	HeadBlockQ backupHashQueue
 	FastBlockQ backupHashQueue
 )
@@ -75,7 +125,8 @@ type DBManager interface {
 	GetStateTrieMigrationDB() Database
 	GetMiscDB() Database
 	GetSnapshotDB() Database
-
+	GetFlatDB() erigon_kv.RwDB
+	GetRWTx() erigon_kv.RwTx
 	// from accessors_chain.go
 	ReadCanonicalHash(number uint64) common.Hash
 	WriteCanonicalHash(hash common.Hash, number uint64)
@@ -426,6 +477,8 @@ type databaseManager struct {
 	config *DBConfig
 	dbs    []Database
 	cm     *cacheManager
+	flatkv erigon_kv.RwDB
+	rwtx   erigon_kv.RwTx
 
 	// TODO-Kaia need to refine below.
 	// -merge status variable
@@ -444,6 +497,9 @@ func NewMemoryDBManager() DBManager {
 		cm:     newCacheManager(),
 	}
 	dbm.dbs[0] = NewMemDB()
+
+	rwdb := mdbx.New(erigon_kv.ChainDB, nil).InMem("").MustOpen()
+	dbm.flatkv = rwdb
 
 	return &dbm
 }
@@ -546,6 +602,29 @@ func databaseDBManager(dbc *DBConfig) (*databaseManager, error) {
 		dbm.dbs[et] = db
 		db.Meter(dbMetricPrefix + dbBaseDirs[et] + "/") // Each database collects metrics independently.
 	}
+	rwdb := mdbx.New(erigon_kv.ChainDB, &logWrapper{logger}).
+		Path(filepath.Join(dbc.Dir, "flatkv")).
+		Exclusive(false).
+		MustOpen()
+	dbm.flatkv = rwdb
+	dirs := datadir.New(path.Join("/tmp", "flatdata"))
+	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, config3.DefaultStepSize, rwdb, nil)
+	if err != nil {
+		panic(err)
+	}
+	if err := agg.OpenFolder(); err != nil {
+		panic(err)
+	}
+	tempdb, err := temporal.New(rwdb, agg)
+	if err != nil {
+		panic(err)
+	}
+	dbm.flatkv = tempdb
+	/*rwtx, err := tempdb.BeginRw(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	dbm.rwtx = rwtx*/
 	return dbm, nil
 }
 
@@ -916,6 +995,14 @@ func (dbm *databaseManager) GetMiscDB() Database {
 
 func (dbm *databaseManager) GetSnapshotDB() Database {
 	return dbm.getDatabase(SnapshotDB)
+}
+
+func (dbm *databaseManager) GetFlatDB() erigon_kv.RwDB {
+	return dbm.flatkv
+}
+
+func (dbm *databaseManager) GetRWTx() erigon_kv.RwTx {
+	return dbm.rwtx
 }
 
 func (dbm *databaseManager) TryCatchUpWithPrimary() error {
