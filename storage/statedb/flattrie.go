@@ -17,6 +17,7 @@
 package statedb
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"path"
 	"sync"
 
+	"github.com/c2h5oh/datasize"
 	"github.com/erigontech/erigon-lib/commitment"
 	"github.com/erigontech/erigon-lib/common/datadir"
 	"github.com/erigontech/erigon-lib/config3"
@@ -135,8 +137,10 @@ var temporaryMdbx erigon_kv.RwDB
 var rwtx erigon_kv.RwTx
 var mu sync.RWMutex
 
+var useDiff = false
+
 func init() {
-	var err error
+	/*var err error
 	temporaryMdbx, err = mdbx.NewTemporaryMdbx(context.Background(), "/tmp")
 	if err != nil {
 		panic(err)
@@ -158,15 +162,17 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-	mu = sync.RWMutex{}
+	mu = sync.RWMutex{}*/
 }
 
 // FlatTrie is not safe for concurrent use.
 type FlatTrie struct {
 	//TrieOpts
 
-	db database.Database
-	tx erigon_kv.Tx
+	tx        erigon_kv.Tx
+	rwdb      erigon_kv.RwDB
+	dbm       database.DBManager
+	changeset *erigon_state.StateChangeSet
 
 	// change this to uint64
 	num        *big.Int
@@ -175,12 +181,23 @@ type FlatTrie struct {
 	commitHash common.Hash
 	hash       common.Hash
 	hph        *commitment.HexPatriciaHashed
+	hphBuf     []byte
 	sd         *erigon_state.SharedDomains
 
 	diff map[string][]byte
 }
 
-func NewFlatTrie3(kv erigon_kv.RwTx) (*FlatTrie, error) {
+func NewFlatTrieWithDBManager(db database.DBManager) (*FlatTrie, error) {
+	return &FlatTrie{
+		rwdb:      db.GetFlatDB(),
+		num:       big.NewInt(0),
+		dbm:       db,
+		diff:      make(map[string][]byte),
+		changeset: &erigon_state.StateChangeSet{},
+	}, nil
+}
+
+func NewFlatTrie3(kv erigon_kv.Tx) (*FlatTrie, error) {
 	sd, err := erigon_state.NewSharedDomains(kv, nil)
 	if err != nil {
 		return nil, err
@@ -198,7 +215,6 @@ func NewFlatTrie2(db *Database, opts *TrieOpts) (*FlatTrie, error) {
 		opts = &TrieOpts{PruningBlockNumber: 0}
 	}
 	t := &FlatTrie{
-		db:   db.diskDB.GetStateTrieDB(),
 		num:  big.NewInt(int64(opts.PruningBlockNumber)),
 		diff: make(map[string][]byte),
 	}
@@ -250,7 +266,6 @@ func NewFlatTrie(db database.Database, opts *TrieOpts) (*FlatTrie, error) {
 		opts = &TrieOpts{PruningBlockNumber: 0}
 	}
 	t := &FlatTrie{
-		db:   db,
 		num:  big.NewInt(int64(opts.PruningBlockNumber)),
 		diff: make(map[string][]byte),
 	}
@@ -295,7 +310,6 @@ func NewFlatTrie(db database.Database, opts *TrieOpts) (*FlatTrie, error) {
 
 func NewFlatTrieWithOpts(db database.Database, num *big.Int, addr common.Address, writable bool) (*FlatTrie, error) {
 	return &FlatTrie{
-		db:       db,
 		num:      num,
 		addr:     addr,
 		writable: writable,
@@ -315,21 +329,97 @@ func (t *FlatTrie) SetWritable(writable bool) {
 	t.writable = writable
 }
 
+type txWithCtx struct {
+	erigon_kv.Tx
+	ac *erigon_state.AggregatorRoTx
+}
+
+func WrapTxWithCtx(tx erigon_kv.Tx, ctx *erigon_state.AggregatorRoTx) *txWithCtx {
+	return &txWithCtx{Tx: tx, ac: ctx}
+}
+func (tx *txWithCtx) AggTx() any { return tx.ac }
+
+func (t *FlatTrie) getSd() (*erigon_state.SharedDomains, erigon_kv.RwTx, *erigon_state.AggregatorRoTx, *erigon_state.Aggregator, erigon_kv.RwDB, error) {
+	aggStepSize := uint64(20)
+	dirs := datadir.New(path.Join(t.dbm.GetDBConfig().Dir, "flatdata"))
+	db := mdbx.New(erigon_kv.ChainDB, nil).
+		//Path(dirs.Chaindata).
+		InMem(dirs.Chaindata).
+		GrowthStep(32 * datasize.MB).
+		MapSize(2 * datasize.GB).
+		MustOpen()
+	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, aggStepSize, db, nil)
+	if err != nil {
+		db.Close()
+		return nil, nil, nil, nil, nil, err
+	}
+	err = agg.OpenFolder()
+	if err != nil {
+		agg.Close()
+		db.Close()
+		return nil, nil, nil, nil, nil, err
+	}
+	agg.DisableFsync()
+
+	ac := agg.BeginFilesRo()
+	tx, err := db.BeginRw(context.Background())
+	if err != nil {
+		ac.Close()
+		agg.Close()
+		db.Close()
+		return nil, nil, nil, nil, nil, err
+	}
+
+	sd, err := erigon_state.NewSharedDomains(WrapTxWithCtx(tx, ac), nil)
+	if err != nil {
+		tx.Rollback()
+		ac.Close()
+		agg.Close()
+		db.Close()
+		return nil, nil, nil, nil, nil, err
+	}
+	return sd, tx, ac, agg, db, nil
+}
+
 // 1. Read from t.diff at (key)
 // 2. Read from DB at (key, t.num) or (t.addr, key, t.num)
 func (t *FlatTrie) TryGet(key []byte) ([]byte, error) {
-	/*logger.Warn("FlatTrie TryGet", "key", key)
+	fmt.Printf("TryGet: %x\n", key)
+	if useDiff {
+		return t.tryGetDiff(key)
+	}
+	if t.sd != nil {
+		return t.tryGetSD(key)
+	}
+	return t.tryGetNewSD(key)
+}
+
+func (t *FlatTrie) tryGetDiff(key []byte) ([]byte, error) {
 	if t.addr != (common.Address{}) {
 		key = append(t.addr.Bytes(), key...)
 	}
+	t.dbm.GetFlatMu().RLock()
+	defer t.dbm.GetFlatMu().RUnlock()
 	if val, ok := t.diff[string(key)]; ok {
 		return val, nil
 	}
-	it := t.db.NewIterator(key, t.num.FillBytes(make([]byte, 8)))
-	if it.Next() {
-		return it.Value(), nil
+	tx, err := t.rwdb.BeginRo(context.Background())
+	if err != nil {
+		return nil, err
 	}
-	return nil, ErrNotFound*/
+	defer tx.Rollback()
+	sd, err := erigon_state.NewSharedDomains(tx, nil)
+	if err != nil {
+		return nil, err
+	}
+	val, _, err := sd.GetLatest(erigon_kv.AccountsDomain, key)
+	if err != nil {
+		return nil, ErrNotFound
+	}
+	return val, nil
+}
+
+func (t *FlatTrie) tryGetSD(key []byte) ([]byte, error) {
 	mu.RLock()
 	defer mu.RUnlock()
 	val, _, err := t.sd.GetLatest(erigon_kv.AccountsDomain, key)
@@ -340,92 +430,221 @@ func (t *FlatTrie) TryGet(key []byte) ([]byte, error) {
 	return val, nil
 }
 
+func (t *FlatTrie) tryGetNewSD(key []byte) ([]byte, error) {
+	t.dbm.GetFlatMu().Lock()
+	defer t.dbm.GetFlatMu().Unlock()
+	sd, tx, ac, agg, db, err := t.getSd()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	defer agg.Close()
+	defer ac.Close()
+	defer tx.Rollback()
+	defer sd.Close()
+
+	val, _, err := sd.GetLatest(erigon_kv.AccountsDomain, key)
+	if err != nil {
+		return nil, err
+	}
+	return val, nil
+}
+
+// update 할때 diff map에 저장하고, hph 만들어서 process 까지
 func (t *FlatTrie) TryUpdate(key, value []byte) error {
-	/*logger.Warn("FlatTrie TryUpdate", "key", key, "value", value)
-	t.hash = common.Hash{}
+	fmt.Printf("TryUpdate: %x, %x\n", key, value)
+	if useDiff {
+		return t.tryUpdateDiff(key, value)
+	}
+	if t.sd != nil {
+		return t.tryUpdateSD(key, value)
+	}
+	return t.tryUpdateNewSD(key, value)
+}
+
+func (t *FlatTrie) tryUpdateDiff(key, value []byte) error {
+	t.dbm.GetFlatMu().Lock()
+	defer t.dbm.GetFlatMu().Unlock()
 	t.diff[string(key)] = value
-	return nil*/
 
-	//err := t.sd.DomainPut(erigon_kv.AccountsDomain, key, nil, value, nil, 0)
-
-	// suppose value is encoded for hashing
-	/*acc := accounts.Account{}
-	err := acc.DecodeForHashing(value)
+	sd, err := erigon_state.NewSharedDomains(rwtx, nil)
 	if err != nil {
 		return err
 	}
-	accBytes := accounts.SerialiseV3(&acc)
-	err = t.sd.DomainPut(erigon_kv.AccountsDomain, key, nil, accBytes, nil, 0)
+	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+	hph.SetState(t.hphBuf)
+	// TODO: ModeUpdate or ModeDirect?
+	updates := commitment.NewUpdates(commitment.ModeDirect, "tmpdir", commitment.KeyToHexNibbleHash)
+	updates.TouchPlainKey(string(key), value, updates.TouchAccount)
+	fmt.Printf("tryUpdateDiff updates: %v\n", updates)
+	hash, err := hph.Process(context.Background(), updates, "FlatTrie.TryUpdate")
 	if err != nil {
 		return err
 	}
-	//storageByte
+	fmt.Printf("tryUpdateDiff hash: %x\n", hash)
+	//rwtx.Rollback()
+	t.hash = common.BytesToHash(hash)
+	s, err := hph.EncodeCurrentState(nil)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(s, t.hphBuf) {
+		fmt.Printf("tryUpdateDiff hphBuf is same\n")
+	}
+	//t.hphBuf = s
+	t.hphBuf = make([]byte, len(s))
+	copy(t.hphBuf, s)
+	return nil
+}
+
+func (t *FlatTrie) tryUpdateNewSD(key, value []byte) error {
+	/*rwtx, err := t.dbm.GetFlatDB().BeginRw(context.Background())
+	if err != nil {
+		return err
+	}
+	// rollback later manually?
+	//defer rwtx.Rollback()
+	//return nil
+
+	// a) try DomainPut
+	//defer rwtx.Commit()
+	sdsd, err := erigon_state.NewSharedDomains(rwtx, nil)
+	if err != nil {
+		return err
+	}
+	//defer sdsd.Flush(context.Background(), rwtx)
+	err = sdsd.DomainPut(erigon_kv.AccountsDomain, key, nil, value, nil, 0)
+	if err != nil {
+		return err
+	}
+	err = sdsd.Flush(context.Background(), rwtx)
+	if err != nil {
+		return err
+	}
+	sdsd.Close()
+	err = rwtx.Commit()
+	if err != nil {
+		return err
+	}
+	err = t.dbm.GetAgg().BuildFiles(t.num.Uint64())
+	if err != nil {
+		return err
+	}
+	aggtx := sdsd.AggTx().(*erigon_state.AggregatorRoTx)
+	aggtx.Close()
 	return nil*/
 
+	t.dbm.GetFlatMu().Lock()
+	defer t.dbm.GetFlatMu().Unlock()
+	sd, tx, ac, agg, db, err := t.getSd()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	defer agg.Close()
+	defer ac.Close()
+	// comit? rollback?
+	defer tx.Commit()
+	defer sd.Close()
+
+	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+	hph.SetState(t.hphBuf)
+
+	err = sd.DomainPut(erigon_kv.AccountsDomain, key, nil, value, nil, 0)
+	if err != nil {
+		return err
+	}
+	// Would this help?
+	//_, err = sd.ComputeCommitment(context.Background(), false, t.num.Uint64(), "asdf")
+	//if err != nil {
+	//	return err
+	//}
+
+	err = sd.Flush(context.Background(), tx)
+	if err != nil {
+		panic(err)
+		return err
+	}
+	err = tx.Commit()
+	if err != nil {
+		return err
+	}
+	err = agg.BuildFiles(10)
+	if err != nil {
+		return err
+	}
+	buf, err := hph.EncodeCurrentState(nil)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(buf, t.hphBuf) {
+		fmt.Printf("tryUpdateNewSD hphBuf is same\n")
+	}
+	t.hphBuf = make([]byte, len(buf))
+	copy(t.hphBuf, buf)
+	return nil
+}
+
+func (t *FlatTrie) tryUpdateSD(key, value []byte) error {
 	mu.Lock()
 	defer mu.Unlock()
 	fmt.Printf("TryUpdate: %x, %x\n", key, value)
 	return t.sd.DomainPut(erigon_kv.AccountsDomain, key, nil, value, nil, 0)
 }
 
-func (t *FlatTrie) CommitHash() common.Hash {
-	if t.commitHash != (common.Hash{}) {
-		return t.commitHash
+func (t *FlatTrie) Hash() common.Hash {
+	if true {
+		hash, _ := t.Commit(nil)
+		return hash
 	}
-	sc, err := NewSecureTrie(common.Hash{}, NewDatabase(database.NewMemoryDBManager()), nil)
+	if !useDiff {
+		return t.hashSD()
+	}
+	//t.dbm.GetFlatMu().RLock()
+	//defer t.dbm.GetFlatMu().RUnlock()
+	//return t.hash
+	rwtx, err := t.dbm.GetFlatDB().BeginRw(context.Background())
 	if err != nil {
-		logger.Error("FlatTrie Hash NewSecureTrie error", "err", err)
 		return common.Hash{}
 	}
-	var keySet [][]byte
-	if t.addr == (common.Address{}) {
-		keySet = t.AccountSet()
-	} else {
-		keySet = t.StorageSet()
+	defer rwtx.Rollback()
+	sd, err := erigon_state.NewSharedDomains(rwtx, nil)
+	if err != nil {
+		return common.Hash{}
 	}
-	for _, key := range keySet {
-		val, err := t.db.Get(append(key[len(AccountSetPrefix):], LatestBlockNumberSuffix...))
-		fmt.Printf("key: %x (%s), val: %x (%s)\n", key, string(key[len(AccountSetPrefix):]), val, string(val))
-		if err != nil {
-			logger.Error("FlatTrie Hash TryGet error", "err", err)
-			panic(err)
-			return common.Hash{}
-		}
-		err = sc.TryUpdate(key[len(AccountSetPrefix):], val)
-		if err != nil {
-			logger.Error("FlatTrie Hash TryUpdate error", "err", err)
-			panic(err)
-			return common.Hash{}
-		}
+	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+	// see if hph state differs
+	s, err := hph.EncodeCurrentState(nil)
+	if err != nil {
+		fmt.Printf("### cannot encode current state for compare\n")
 	}
-	t.commitHash = sc.Hash()
-	return t.commitHash
-}
+	for strkey, val := range t.diff {
+		key := []byte(strkey)
+		sd.DomainPut(erigon_kv.AccountsDomain, key, nil, val, nil, 0)
 
-/*
-// hashKey returns the hash of key as an ephemeral buffer.
-// The caller must not hold onto the return value because it will become
-// invalid on the next call to hashKey or secKey.
-func (t *FlatTrie) hashKey(key []byte) []byte {
-	buf := make([]byte, common.HashLength)
-	hashedKey := make([]byte, common.HashLength*2)
-	h := newHasher(nil)
-	h.sha.Reset()
-	h.sha.Write(key)
-	buf = h.sha.Sum(buf[:0])
-	for i, c := range buf {
-		hashedKey[i*2] = (c >> 4) & 0xf
-		hashedKey[i*2+1] = c & 0xf
 	}
-	returnHasherToPool(h)
-	return hashedKey
-}
-*/
+	hash, err := sd.ComputeCommitmentWithoutReset(context.Background(), false, t.num.Uint64(), "asdf")
+	/*var updates commitment.Updates
+	for strkey, val := range t.diff {
+		key := []byte(strkey)
+		updates.TouchPlainKey(string(key), val, updates.TouchAccount)
+		fmt.Printf("Hash updates: %v\n", updates)
 
-func (t *FlatTrie) Hash() common.Hash {
-	/*if t.hash != (common.Hash{}) {
-		return t.hash
-	}*/
+	}
+	hash, err := hph.Process(context.Background(), &updates, "FlatTrie.TryUpdate")*/
+	if err != nil {
+		return common.Hash{}
+	}
+	s2, err := hph.EncodeCurrentState(nil)
+	if err != nil {
+		fmt.Printf("### cannot encode current state for compare\n")
+	}
+	if !bytes.Equal(s, s2) {
+		fmt.Printf("### hph state differs!!!!\n")
+	}
+	return common.BytesToHash(hash)
+}
+func (t *FlatTrie) hashSD() common.Hash {
 	//hash, err := t.sd.ComputeCommitment(context.Background(), true, t.num.Uint64(), "asdf")
 	hash, err := t.sd.ComputeCommitmentWithoutReset(context.Background(), false, t.num.Uint64(), "asdf")
 	//hash, err := t.sd.GetCommitmentContext().Trie().Process(context.Background(), t.sd.GetUpdates(), "FlatTrie.Hash")
@@ -436,68 +655,118 @@ func (t *FlatTrie) Hash() common.Hash {
 	return common.BytesToHash(hash)
 }
 
-func (t *FlatTrie) HashSC() common.Hash {
-	if t.hash != (common.Hash{}) {
-		return t.hash
-	}
-	sc, err := NewSecureTrie(common.Hash{}, NewDatabase(database.NewMemoryDBManager()), nil)
-	if err != nil {
-		logger.Error("FlatTrie Hash NewSecureTrie error", "err", err)
-		return common.Hash{}
-	}
-	var keySet [][]byte
-	if t.addr == (common.Address{}) {
-		keySet = t.AccountSet()
-	} else {
-		keySet = t.StorageSet()
-	}
-	for _, key := range keySet {
-		val, err := t.db.Get(append(key[len(AccountSetPrefix):], LatestBlockNumberSuffix...))
-		fmt.Printf("key: %x (%s), val: %x (%s)\n", key, string(key[len(AccountSetPrefix):]), val, string(val))
-		if err != nil {
-			logger.Error("FlatTrie Hash TryGet error", "err", err)
-			panic(err)
-			return common.Hash{}
-		}
-		err = sc.TryUpdate(key[len(AccountSetPrefix):], val)
-		if err != nil {
-			logger.Error("FlatTrie Hash TryUpdate error", "err", err)
-			panic(err)
-			return common.Hash{}
-		}
-	}
-	for key, val := range t.diff {
-		fmt.Printf("key: %x (%s), val: %x (%s)\n", []byte(key), key, val, string(val))
-		err = sc.TryUpdate([]byte(key), val)
-		if err != nil {
-			logger.Error("FlatTrie Hash TryUpdate error", "err", err)
-			panic(err)
-			return common.Hash{}
-		}
-	}
-	t.hash = sc.Hash()
-	return t.hash
-}
+// commit 할때는 diff map에 있는 것만 써야함?
+// hash 할때는 domainPut 없이 hash만 만들 수 있어야함. commit을 하지 않아야 되기 때문
+// put 없이 touchkey만 했을 때 해쉬계산만 되는지?
 
-func (t *FlatTrie) AccountSet() [][]byte {
-	it := t.db.NewIterator(AccountSetPrefix, nil)
-	var keySet [][]byte
-	for it.Next() {
-		keySet = append(keySet, it.Key())
-	}
-	return keySet
-}
-
-func (t *FlatTrie) StorageSet() [][]byte {
-	it := t.db.NewIterator(StorageSetPrefix, nil)
-	var keySet [][]byte
-	for it.Next() {
-		keySet = append(keySet, it.Key())
-	}
-	return keySet
-}
-
+// 또하나는 diff가 10개인데 commit을 하면 flush되고 diff가 0개겟지만
+// diff가 10개일때 해쉬를 하면 디프가 그대로 쌓여있음. 그래서 해쉬를 할때마다 hph를 불러오는건 비효율적
+// 업데이트 할때마다 hph에 녹여낼 수 잇는지?
+// 그리고 커밋할 때는 디프를 디비에 써주기만 하면 됨
 func (t *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) {
+	if useDiff {
+		return t.tryCommitDiff(cb)
+	}
+	if t.sd != nil {
+		return t.tryCommitSD(cb)
+	}
+	return t.tryCommitNewSD(cb)
+}
+
+func (t *FlatTrie) tryCommitNewSD(cb LeafCallback) (common.Hash, error) {
+	t.dbm.GetFlatMu().Lock()
+	defer t.dbm.GetFlatMu().Unlock()
+	sd, tx, ac, agg, db, err := t.getSd()
+	if err != nil {
+		return common.Hash{}, err
+	}
+	defer db.Close()
+	defer agg.Close()
+	defer ac.Close()
+	//defer tx.Rollback()
+	defer sd.Close()
+
+	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+	fmt.Printf("tryCommitNewSD hphBuf: %x\n", t.hphBuf)
+	hph.SetState(t.hphBuf)
+
+	// Instead of saving state, save state to hphBuf
+	hash, err := sd.ComputeCommitment(context.Background(), false, t.num.Uint64(), "asdf")
+	if err != nil {
+		return common.Hash{}, err
+	}
+	err = sd.Flush(context.Background(), tx)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	err = tx.Commit()
+	if err != nil {
+		return common.Hash{}, err
+	}
+	t.num = t.num.Add(t.num, big.NewInt(1))
+	buf, err := hph.EncodeCurrentState(nil)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if bytes.Equal(buf, t.hphBuf) {
+		fmt.Printf("tryCommitNewSD hphBuf is same\n")
+	}
+	t.hphBuf = make([]byte, len(buf))
+	copy(t.hphBuf, buf)
+	return common.BytesToHash(hash), nil
+}
+
+func (t *FlatTrie) tryCommitDiff(cb LeafCallback) (common.Hash, error) {
+	t.dbm.GetFlatMu().Lock()
+	defer t.dbm.GetFlatMu().Unlock()
+	rwtx, err := t.dbm.GetFlatDB().BeginRw(context.Background())
+	if err != nil {
+		return common.Hash{}, err
+	}
+	defer rwtx.Commit()
+	sd, err := erigon_state.NewSharedDomains(rwtx, nil)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	//defer sd.Close()
+	// TODO: should we set txnum?
+	//sd.SetTxNum(t.num.Uint64())
+
+	// a) try computecommitment
+	hashh, err := sd.ComputeCommitmentWithoutReset(context.Background(), true, t.num.Uint64(), "asdf")
+	if err != nil {
+		return common.Hash{}, err
+	}
+	sd.Flush(context.Background(), rwtx)
+	sd.Close()
+	return common.BytesToHash(hashh), nil
+
+	// b) try diff domainPut
+	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+	hph.SetState(t.hphBuf)
+	for strkey, val := range t.diff {
+		key := []byte(strkey)
+		//cb([][]byte{key}, key, val, common.ExtHash{}, 0)
+		sd.DomainPut(erigon_kv.AccountsDomain, key, nil, val, nil, 0)
+	}
+	hash, err := sd.ComputeCommitmentWithoutReset(context.Background(), true, t.num.Uint64(), "asdf")
+	fmt.Printf("tryCommitDiff hash: %x\n", hash)
+	if err != nil {
+		fmt.Printf("tryCommitDiff ComputeCommitmentWithoutReset error: %v\n", err)
+		return common.Hash{}, err
+	}
+	s, err := hph.EncodeCurrentState(nil)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	t.hphBuf = s
+	t.hash = common.BytesToHash(hash)
+	t.diff = make(map[string][]byte)
+	return t.hash, nil
+}
+
+func (t *FlatTrie) tryCommit(cb LeafCallback) (common.Hash, error) {
+	return common.Hash{}, nil
 	/*for strkey, val := range t.diff {
 		key := []byte(strkey)
 		var setKey []byte
@@ -529,6 +798,9 @@ func (t *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) {
 	t.num = t.num.Add(t.num, big.NewInt(1))
 	t.diff = make(map[string][]byte)
 	return t.hash, nil*/
+}
+
+func (t *FlatTrie) tryCommitSD(cb LeafCallback) (common.Hash, error) {
 	hash, err := t.sd.ComputeCommitmentWithoutReset(context.Background(), true, t.num.Uint64(), "asdf")
 	if err != nil {
 		return common.Hash{}, err
@@ -625,7 +897,20 @@ func (it *flatTrieIterator) Next(descend bool) bool {
 	}
 
 	// Get the next entry from the trie
-	val, _, err := it.trie.sd.GetLatest(erigon_kv.AccountsDomain, key)
+	it.trie.dbm.GetFlatMu().Lock()
+	defer it.trie.dbm.GetFlatMu().Unlock()
+	sd, tx, ac, agg, db, err := it.trie.getSd()
+	if err != nil {
+		it.err = err
+		return false
+	}
+	defer db.Close()
+	defer agg.Close()
+	defer ac.Close()
+	defer tx.Rollback()
+	defer sd.Close()
+
+	val, _, err := sd.GetLatest(erigon_kv.AccountsDomain, key)
 	if err != nil {
 		it.err = err
 		return false
@@ -696,7 +981,6 @@ func (t *FlatTrie) Copy2() *FlatTrie {
 	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
 	hph.SetState(s)
 	return &FlatTrie{
-		db:  t.db,
 		tx:  t.tx,
 		sd:  sd,
 		hph: hph,
@@ -704,6 +988,13 @@ func (t *FlatTrie) Copy2() *FlatTrie {
 }
 
 func (t *FlatTrie) Copy() *FlatTrie {
+	return &FlatTrie{
+		dbm: t.dbm,
+		num: t.num,
+	}
+}
+
+func (t *FlatTrie) Copy3() *FlatTrie {
 	mdbx, err := mdbx.NewTemporaryMdbx(context.Background(), "/tmp")
 	if err != nil {
 		return nil
@@ -735,70 +1026,8 @@ func (t *FlatTrie) Copy() *FlatTrie {
 	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
 	hph.SetState(s)
 	return &FlatTrie{
-		db:  t.db,
 		tx:  tx,
 		sd:  sd,
 		hph: hph,
 	}
 }
-
-/*
-type FlatKVIterator struct {
-	db database.Database
-	it database.Iterator
-}
-
-func NewFlatKVIterator(db database.Database, it database.Iterator) *FlatKVIterator {
-	return &FlatKVIterator{
-		db: db,
-		it: it,
-	}
-}
-
-func (it *FlatKVIterator) Next(bool) bool {
-	return it.it.Next()
-}
-
-func (it *FlatKVIterator) Error() error {
-	return it.it.Error()
-}
-
-func (it *FlatKVIterator) Key() []byte {
-	return it.it.Key()
-}
-
-func (it *FlatKVIterator) Value() []byte {
-	return it.it.Value()
-}
-
-func (it *FlatKVIterator) Hash() common.Hash {
-	return common.Hash{}
-}
-
-func (it *FlatKVIterator) Parent() common.Hash {
-	return common.Hash{}
-}
-
-func (it *FlatKVIterator) Path() []byte {
-	return []byte{}
-}
-
-func (it *FlatKVIterator) Leaf() bool {
-	return true
-}
-
-func (it *FlatKVIterator) LeafKey() []byte {
-	return it.db.NewIterator(nil, nil).Key()
-}
-
-func (it *FlatKVIterator) LeafBlob() []byte {
-	return it.db.NewIterator(nil, nil).Value()
-}
-
-func (it *FlatKVIterator) LeafProof() [][]byte {
-	return [][]byte{}
-}
-
-func (it *FlatKVIterator) AddResolver(database.DBManager) {
-}
-*/

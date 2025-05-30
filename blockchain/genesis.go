@@ -369,7 +369,8 @@ func (g *Genesis) ToBlock(baseStateRoot common.Hash, db database.DBManager) *typ
 		head.MixHash = params.ZeroMixHash
 	}
 
-	stateDB.Commit(false)
+	h, _ := stateDB.Commit(false)
+	fmt.Printf("Genesis block commit: %x\n", h)
 	stateDB.Database().TrieDB().Commit(root, true, g.Number)
 
 	return types.NewBlock(head, nil, nil)

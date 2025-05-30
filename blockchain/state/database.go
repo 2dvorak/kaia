@@ -164,7 +164,7 @@ func NewDatabaseWithExistingCache(db database.DBManager, cache statedb.TrieNodeC
 
 type cachingDB struct {
 	db            *statedb.Database
-	tx            erigon_kv.RwTx
+	tx            erigon_kv.RwDB
 	codeSizeCache common.Cache
 	codeCache     *lru.SizeConstrainedCache[common.Hash, []byte]
 }
@@ -174,7 +174,8 @@ func (db *cachingDB) OpenTrie(root common.Hash, opts *statedb.TrieOpts) (Trie, e
 	// 요걸 NewFlatTrie로 바꿨을 때 statedb_test.go 가 잘 돌아가야됨.
 	if common.FlatTrie {
 		//return statedb.NewFlatTrie2(db.db, opts)
-		return statedb.NewFlatTrie3(db.tx)
+		//return statedb.NewFlatTrie3(db.tx)
+		return statedb.NewFlatTrieWithDBManager(db.db.DiskDB())
 	} else {
 		return statedb.NewSecureTrie(root, db.db, opts)
 	}

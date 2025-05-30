@@ -23,7 +23,6 @@
 package statedb
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -333,7 +332,7 @@ func NewDatabaseWithExistingCache(diskDB database.DBManager, cache TrieNodeCache
 	}
 }
 
-func NewTx(diskDB database.DBManager) erigon_kv.RwTx {
+func NewTx(diskDB database.DBManager) erigon_kv.RwDB {
 	/*flatDB := diskDB.GetFlatDB()
 	dirs := datadir.New(path.Join("/tmp", "flatdata"))
 	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, config3.DefaultStepSize, temporaryMdbx, nil)
@@ -353,19 +352,10 @@ func NewTx(diskDB database.DBManager) erigon_kv.RwTx {
 	}
 	return rwtx*/
 	//return diskDB.GetRWTx()
-	//rwtx, err := diskDB.GetFlatDB().BeginRw(context.Background())
-	rwtx, err := diskDB.GetFlatDB().BeginRw(context.Background())
-	if err != nil {
-		panic(err)
-	}
+	return diskDB.GetFlatDB()
 	//rwtx.Rollback()
 	//rwtx.Commit()
-	// open twice immediately, see if fails
-	_, err = diskDB.GetFlatDB().BeginRw(context.Background())
-	if err != nil {
-		//	panic(err)
-	}
-	return rwtx
+	//return rwtx
 }
 
 func getTrieNodeCacheSizeMiB() int {

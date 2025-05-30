@@ -23,11 +23,22 @@ import (
 	"fmt"
 	"math/big"
 	"math/rand"
+	"os"
+	"path"
 	"testing"
 	"time"
 
+	"github.com/c2h5oh/datasize"
+	"github.com/erigontech/erigon-lib/commitment"
 	erigon_common "github.com/erigontech/erigon-lib/common"
+	"github.com/erigontech/erigon-lib/common/datadir"
+	"github.com/erigontech/erigon-lib/config3"
+	erigon_kv "github.com/erigontech/erigon-lib/kv"
+	"github.com/erigontech/erigon-lib/kv/mdbx"
+	erigon_log "github.com/erigontech/erigon-lib/log/v3"
+	erigon_state "github.com/erigontech/erigon-lib/state"
 	"github.com/erigontech/erigon-lib/types/accounts"
+	"github.com/holiman/uint256"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/crypto"
@@ -295,20 +306,913 @@ func TestTest(t *testing.T) {
 	t.Fatal("stop here")
 }
 
-func TestKairos(t *testing.T) {
-	trie := newEmptyFlatTrie()
-	trie.TryUpdate(common.Hex2Bytes("0000000000000000000000000000000000000400"), common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"))
-	trie.TryUpdate(common.Hex2Bytes("4937a6f664630547f6b0c3c235c4f03a64ca36b1"), common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0"))
+func newEmptyFlatTrieWithDBManager() *FlatTrie {
+	dir, _ := os.MkdirTemp(os.TempDir(), "test")
+	dbm := database.NewDBManager(&database.DBConfig{
+		SingleDB: false,
+		Dir:      dir,
+	})
+
+	trie, err := NewFlatTrieWithDBManager(dbm)
+	if err != nil {
+		panic(err)
+	}
+	return trie
+}
+
+func TestKairosButWithEthData(t *testing.T) {
+	var err error
+	// ?? 0d3cf586ed4fb6fe6b0b8ed5652b1876b97427621f8cfb400b6581f5c6530c1b
+	trie := newEmptyFlatTrieWithDBManager()
+	acclist := make([][]byte, 0)
+	for i := 0; i < 3; i++ {
+		acc := accounts.Account{
+			Nonce:       uint64(i + 100_000),
+			Balance:     *uint256.NewInt(uint64((i + 2) * 100_000)),
+			CodeHash:    erigon_common.Hash{},
+			Incarnation: 3,
+		}
+		acclist = append(acclist, accounts.SerialiseV3(&acc))
+	}
+	addrlist := make([]common.Address, 0)
+	for i := 0; i < 10; i++ {
+		addrlist = append(addrlist, common.HexToAddress(fmt.Sprintf("0x%040x", i+1)))
+	}
+	//buf := accounts.SerialiseV3(&acc)
+	//_ = buf
+	//buf2 := make([]byte, acc.EncodingLengthForHashing())
+	//acc.EncodeForHashing(buf2)
+	tryEthEncoding := true
+	if !tryEthEncoding {
+		if err = trie.TryUpdate(common.Hex2Bytes("0000000000000000000000000000000000000400"), common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980")); err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		if err = trie.TryUpdate(common.Hex2Bytes("4937a6f664630547f6b0c3c235c4f03a64ca36b1"), common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0")); err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		if err = trie.TryUpdate(common.Hex2Bytes("b74ff9dea397fe9e231df545eb53fe2adf776cb2"), common.Hex2Bytes("01cd8088853a0d2313c000008001c0")); err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+	} else {
+		for i, acc := range acclist {
+			if err = trie.TryUpdate(addrlist[i].Bytes(), acc); err != nil {
+				t.Errorf("expected nil got %v", err)
+			}
+		}
+	}
 
 	sc, _ := NewSecureTrie(common.Hash{}, NewDatabase(database.NewMemoryDBManager()), nil)
-	sc.TryUpdate(common.Hex2Bytes("0000000000000000000000000000000000000400"), common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"))
-	sc.TryUpdate(common.Hex2Bytes("4937a6f664630547f6b0c3c235c4f03a64ca36b1"), common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0"))
+	if !tryEthEncoding {
+		sc.TryUpdate(common.Hex2Bytes("0000000000000000000000000000000000000400"), common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"))
+		sc.TryUpdate(common.Hex2Bytes("4937a6f664630547f6b0c3c235c4f03a64ca36b1"), common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0"))
+		sc.TryUpdate(common.Hex2Bytes("b74ff9dea397fe9e231df545eb53fe2adf776cb2"), common.Hex2Bytes("01cd8088853a0d2313c000008001c0"))
+	} else {
+		//sc.TryUpdate(common.Hex2Bytes("0000000000000000000000000000000000000400"), accounts.SerialiseV3(&acc1))
+		// 318ee21401645eb13e96ea52c7830f159fc2952a4c704bb274fba4dd6ccd66af
+		//sc.TryUpdate(common.Hex2Bytes("4937a6f664630547f6b0c3c235c4f03a64ca36b1"), accounts.SerialiseV3(&acc2))
+		// 579b99255c99f3a59d4c99aae3961302dfabf7982ddae62e44ea507bb49d8e7e
+		//sc.TryUpdate(common.Hex2Bytes("b74ff9dea397fe9e231df545eb53fe2adf776cb2"), accounts.SerialiseV3(&acc3))
+		for i, acc := range acclist {
+			if i == len(acclist)-1 {
+				//break
+			}
+			//56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421
+			//42c4607dbe299f769209a9ea17e1c7afc602b48310d3cc0a524dfe0eae3383a6
+			//dcdbc026a6296697789d028072f0a9f0021488ad13eb0f7ab68d143db0b711cd
+			sc.TryUpdate(addrlist[i].Bytes(), acc)
+		}
+	}
 
 	root := trie.Hash()
 	root2 := sc.Hash()
 	fmt.Printf("root: %x\n", root)
 	fmt.Printf("root2: %x\n", root2)
+	root, _ = trie.Commit(nil)
+	root2, _ = sc.Commit(nil)
+	fmt.Printf("root: %x\n", root)
+	fmt.Printf("root2: %x\n", root2)
 	t.Fatal("stop here")
+}
+
+func TestKairos(t *testing.T) {
+	var err error
+	// ?? 0d3cf586ed4fb6fe6b0b8ed5652b1876b97427621f8cfb400b6581f5c6530c1b
+	trie := newEmptyFlatTrieWithDBManager()
+	// fbf14f63f97468e460a42b309bbad44fdc682ab3a7f95fa5d3508c9cf0009946
+	err = trie.TryUpdate(common.Hex2Bytes("0000000000000000000000000000000000000400"), common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"))
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	// be751ffacf5fcf9998d4f90b87164ff95166d55e445c8d27cfecbe0e67a032b6
+	err = trie.TryUpdate(common.Hex2Bytes("4937a6f664630547f6b0c3c235c4f03a64ca36b1"), common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0"))
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	// 60e8f25e2fb479e625347c1f11e2f07c9cd7d0a5320013294d89281b6fceed4f
+	err = trie.TryUpdate(common.Hex2Bytes("b74ff9dea397fe9e231df545eb53fe2adf776cb2"), common.Hex2Bytes("01cd8088853a0d2313c000008001c0"))
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	sc, _ := NewSecureTrie(common.Hash{}, NewDatabase(database.NewMemoryDBManager()), nil)
+	sc.TryUpdate(common.Hex2Bytes("0000000000000000000000000000000000000400"), common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"))
+	sc.TryUpdate(common.Hex2Bytes("4937a6f664630547f6b0c3c235c4f03a64ca36b1"), common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0"))
+	sc.TryUpdate(common.Hex2Bytes("b74ff9dea397fe9e231df545eb53fe2adf776cb2"), common.Hex2Bytes("01cd8088853a0d2313c000008001c0"))
+	root := trie.Hash()
+	root2 := sc.Hash()
+	fmt.Printf("root: %x\n", root)
+	fmt.Printf("root2: %x\n", root2)
+	root, _ = trie.Commit(nil)
+	root2, _ = sc.Commit(nil)
+	fmt.Printf("root: %x\n", root)
+	fmt.Printf("root2: %x\n", root2)
+	t.Fatal("stop here")
+}
+
+func generateInputData() ([][]byte, [][]byte) {
+	return [][]byte{
+			common.Hex2Bytes("0000000000000000000000000000000000000400"),
+			common.Hex2Bytes("4937a6f664630547f6b0c3c235c4f03a64ca36b1"),
+		}, [][]byte{
+			common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"),
+			common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0"),
+		}
+}
+
+func TestReopenLikeAggregatorTestButReuseVars(t *testing.T) {
+	ctx := context.Background()
+	aggStepSize := uint64(config3.DefaultStepSize)
+	aggStepSize = uint64(10)
+
+	//dirs := datadir.New(path.Join(os.TempDir(), "flatdata"))
+	dirs := datadir.New(path.Join("/tmp", "flatdata"))
+	db := mdbx.New(erigon_kv.ChainDB, nil).
+		//Path(dirs.Chaindata).
+		InMem(dirs.Chaindata).
+		GrowthStep(32 * datasize.MB).
+		MapSize(2 * datasize.GB).
+		MustOpen()
+	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, aggStepSize, db, erigon_log.New())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = agg.OpenFolder()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	agg.DisableFsync()
+
+	ac := agg.BeginFilesRo()
+	tx, err := db.BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	sd, err := erigon_state.NewSharedDomains(WrapTxWithCtx(tx, ac), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	changeset := &erigon_state.StateChangeSet{}
+	changesetAt1 := &erigon_state.StateChangeSet{}
+
+	keys, vals := generateInputData()
+
+	var i int
+	roots := make([][]byte, 0, 10)
+	var pruneFrom uint64 = 1
+
+	// it's in the aggregator test, but why?
+	mc := agg.BeginFilesRo()
+	defer mc.Close()
+
+	for i = 0; i < len(vals); i++ {
+		sd.SetTxNum(uint64(i))
+		if i == 1 {
+			sd.SetChangesetAccumulator(changesetAt1)
+		}
+		prev, step, err := sd.GetLatest(erigon_kv.AccountsDomain, keys[i])
+		if err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		err = sd.DomainPut(erigon_kv.AccountsDomain, keys[i], nil, vals[i], prev, step)
+		if err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		hash, err := sd.ComputeCommitment(ctx, true, sd.BlockNum(), "asdf")
+		if err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		fmt.Printf("hash: %x\n", hash)
+		roots = append(roots, hash)
+	}
+
+	err = sd.Flush(context.Background(), tx)
+	if err != nil {
+		panic(err)
+		//return err
+	}
+
+	sd.Close()
+	tx.Commit()
+	ac.Close()
+
+	agg.Close()
+	db.Close()
+
+	db = mdbx.New(erigon_kv.ChainDB, nil).
+		//Path(dirs.Chaindata).
+		InMem(dirs.Chaindata).
+		GrowthStep(32 * datasize.MB).
+		MapSize(2 * datasize.GB).
+		MustOpen()
+	agg, err = erigon_state.NewAggregator2(context.Background(), dirs, aggStepSize, db, erigon_log.New())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = agg.OpenFolder()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	agg.DisableFsync()
+
+	ac = agg.BeginFilesRo()
+	tx, err = db.BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	sd, err = erigon_state.NewSharedDomains(WrapTxWithCtx(tx, ac), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	diffs := [erigon_kv.DomainLen][]erigon_state.DomainEntryDiff{}
+	for idx := range changesetAt1.Diffs {
+		diffs[idx] = changesetAt1.Diffs[idx].GetDiffSet()
+	}
+	/*err = sd.Unwind(context.Background(), tx, 0, pruneFrom, &diffs)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}*/
+	hash, err := sd.ComputeCommitment(ctx, true, sd.BlockNum(), "asdf")
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	fmt.Printf("hash: %x\n", hash)
+	sd.SetChangesetAccumulator(changeset)
+
+	for i = int(pruneFrom); i < len(vals); i++ {
+		sd.SetTxNum(uint64(i))
+		prev, step, err := sd.GetLatest(erigon_kv.AccountsDomain, keys[i])
+		if err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		err = sd.DomainPut(erigon_kv.AccountsDomain, keys[i], nil, vals[i], prev, step)
+		if err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		hash, err := sd.ComputeCommitment(ctx, true, sd.BlockNum(), "asdf")
+		if err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		fmt.Printf("hash: %x\n", hash)
+		if !bytes.Equal(hash, roots[i]) {
+			t.Errorf("expected %x got %x", roots[i], hash)
+		}
+	}
+	t.Fail()
+}
+
+func TestReopenLikeAggregatorTest(t *testing.T) {
+	ctx := context.Background()
+	aggStepSize := uint64(config3.DefaultStepSize)
+	aggStepSize = uint64(10)
+	dirs := datadir.New(path.Join(os.TempDir(), "flatdata"))
+	db := mdbx.New(erigon_kv.ChainDB, nil).
+		//Path(dirs.Chaindata).
+		InMem(dirs.Chaindata).
+		GrowthStep(32 * datasize.MB).
+		MapSize(2 * datasize.GB).
+		MustOpen()
+	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, aggStepSize, db, erigon_log.New())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = agg.OpenFolder()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	agg.DisableFsync()
+
+	ac := agg.BeginFilesRo()
+	tx, err := db.BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	sd, err := erigon_state.NewSharedDomains(WrapTxWithCtx(tx, ac), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	// it's in the aggregator test, but why?
+	mc := agg.BeginFilesRo()
+	defer mc.Close()
+
+	changeset := &erigon_state.StateChangeSet{}
+	changesetAt1 := &erigon_state.StateChangeSet{}
+	sd.SetChangesetAccumulator(changeset)
+	sd.SetTxNum(0)
+	//sd.SetBlockNum(0)
+	prev, step, err := sd.GetLatest(erigon_kv.AccountsDomain, common.Hex2Bytes("0000000000000000000000000000000000000400"))
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = sd.DomainPut(erigon_kv.AccountsDomain, common.Hex2Bytes("0000000000000000000000000000000000000400"), nil, common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"), prev, step)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	sd.SetTxNum(1)
+	sd.SetChangesetAccumulator(changesetAt1)
+	prev, step, err = sd.GetLatest(erigon_kv.AccountsDomain, common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0"))
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = sd.DomainPut(erigon_kv.AccountsDomain, common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0"), nil, common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"), prev, step)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	//hash1, err := sd.ComputeCommitmentWithoutReset(context.Background(), true, sd.BlockNum(), "asdf")
+	hash1, err := sd.ComputeCommitment(ctx, true, sd.BlockNum(), "asdf")
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	fmt.Printf("hash: %x\n", hash1)
+	err = sd.Flush(context.Background(), tx)
+	if err != nil {
+		panic(err)
+		//return err
+	}
+
+	sd.Close()
+	tx.Commit()
+	ac.Close()
+
+	agg.Close()
+	db.Close()
+
+	newdb := mdbx.New(erigon_kv.ChainDB, nil).
+		//Path(dirs.Chaindata).
+		InMem(dirs.Chaindata).
+		GrowthStep(32 * datasize.MB).
+		MapSize(2 * datasize.GB).
+		MustOpen()
+	newagg, err := erigon_state.NewAggregator2(context.Background(), dirs, aggStepSize, newdb, erigon_log.New())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = newagg.OpenFolder()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	newagg.DisableFsync()
+
+	newac := newagg.BeginFilesRo()
+	newtx, err := newdb.BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	newsd, err := erigon_state.NewSharedDomains(WrapTxWithCtx(newtx, newac), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	diffs := [erigon_kv.DomainLen][]erigon_state.DomainEntryDiff{}
+	for idx := range changeset.Diffs {
+		diffs[idx] = changeset.Diffs[idx].GetDiffSet()
+	}
+	err = newsd.Unwind(context.Background(), newtx, 0, 1, &diffs)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	newsd.SetTxNum(1)
+	prev, step, _, err = mc.GetLatest(erigon_kv.AccountsDomain, common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0"), newtx)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = newsd.DomainPut(erigon_kv.AccountsDomain, common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0"), nil, common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"), prev, step)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	//val, _, err := newsd.GetLatest(erigon_kv.AccountsDomain, common.Hex2Bytes("0000000000000000000000000000000000000400"))
+	//if err != nil {
+	//	t.Errorf("expected nil got %v", err)
+	//}
+	//fmt.Printf("val: %x\n", val)
+
+	//hash, err := sd.ComputeCommitmentWithoutReset(context.Background(), true, 0, "asdf")
+	hash, err := newsd.ComputeCommitment(ctx, true, newsd.BlockNum(), "asdf")
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	fmt.Printf("hash: %x\n", hash)
+	if !bytes.Equal(hash, common.Hex2Bytes("fbf14f63f97468e460a42b309bbad44fdc682ab3a7f95fa5d3508c9cf0009946")) {
+		t.Errorf("expected fbf14f63f97468e460a42b309bbad44fdc682ab3a7f95fa5d3508c9cf0009946 got %x", hash)
+	}
+}
+
+func TestHphEncode(t *testing.T) {
+	aggStepSize := uint64(10)
+	tmp1, _ := os.MkdirTemp(os.TempDir(), "flatdata")
+	tmp2, _ := os.MkdirTemp(os.TempDir(), "flatdata")
+	tmp3, _ := os.MkdirTemp(os.TempDir(), "flatdata")
+
+	dirs1 := datadir.New(tmp1)
+	dirs2 := datadir.New(tmp2)
+	dirs3 := datadir.New(tmp3)
+
+	db1 := mdbx.New(erigon_kv.ChainDB, nil).
+		Path(dirs1.Chaindata).
+		Exclusive(false).
+		MustOpen()
+	db2 := mdbx.New(erigon_kv.ChainDB, nil).
+		Path(dirs2.Chaindata).
+		Exclusive(false).
+		MustOpen()
+	db3 := mdbx.New(erigon_kv.ChainDB, nil).
+		Path(dirs3.Chaindata).
+		Exclusive(false).
+		MustOpen()
+
+	agg1, err := erigon_state.NewAggregator2(context.Background(), dirs1, aggStepSize, db1, erigon_log.New())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = agg1.OpenFolder()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	agg2, err := erigon_state.NewAggregator2(context.Background(), dirs2, aggStepSize, db2, erigon_log.New())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = agg2.OpenFolder()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	agg3, err := erigon_state.NewAggregator2(context.Background(), dirs3, aggStepSize, db3, erigon_log.New())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = agg3.OpenFolder()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	ac1 := agg1.BeginFilesRo()
+	ac2 := agg2.BeginFilesRo()
+	ac3 := agg3.BeginFilesRo()
+
+	tx1, err := db1.BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	tx2, err := db2.BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	tx3, err := db3.BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	sd1, err := erigon_state.NewSharedDomains(WrapTxWithCtx(tx1, ac1), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	sd2, err := erigon_state.NewSharedDomains(WrapTxWithCtx(tx2, ac2), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	sd3, err := erigon_state.NewSharedDomains(WrapTxWithCtx(tx3, ac3), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	acc := genRandomAccount()
+	buf := accounts.SerialiseV3(&acc)
+
+	// write eth-encoded state to sd2
+	err = sd2.DomainPut(erigon_kv.AccountsDomain, common.Hex2Bytes("0000000000000000000000000000000000000400"), nil, buf, nil, 0)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	// write kaia-encoded state to sd3
+	err = sd3.DomainPut(erigon_kv.AccountsDomain, common.Hex2Bytes("0000000000000000000000000000000000000400"), nil, common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"), nil, 0)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	err = sd1.Flush(context.Background(), tx1)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = tx1.Commit()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = agg1.BuildFiles(1)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = sd2.Flush(context.Background(), tx2)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = tx2.Commit()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = agg2.BuildFiles(1)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = sd3.Flush(context.Background(), tx3)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = tx3.Commit()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = agg3.BuildFiles(1)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	hph1 := sd1.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+	hph2 := sd2.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+	hph3 := sd3.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+
+	b1, err := hph1.EncodeCurrentState(nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	b2, err := hph2.EncodeCurrentState(nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	b3, err := hph3.EncodeCurrentState(nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	fmt.Printf("b1: %x\n", b1)
+	fmt.Printf("b2: %x\n", b2)
+	fmt.Printf("b3: %x\n", b3)
+
+	sd1.Close()
+	sd2.Close()
+	sd3.Close()
+	tx1.Rollback()
+	tx2.Rollback()
+	tx3.Rollback()
+	ac1.Close()
+	ac2.Close()
+	ac3.Close()
+	db1.Close()
+	db2.Close()
+	db3.Close()
+
+	db1 = mdbx.New(erigon_kv.ChainDB, nil).
+		Path(dirs1.Chaindata).
+		Exclusive(false).
+		MustOpen()
+	db2 = mdbx.New(erigon_kv.ChainDB, nil).
+		Path(dirs2.Chaindata).
+		Exclusive(false).
+		MustOpen()
+	db3 = mdbx.New(erigon_kv.ChainDB, nil).
+		Path(dirs3.Chaindata).
+		Exclusive(false).
+		MustOpen()
+
+	agg1, err = erigon_state.NewAggregator2(context.Background(), dirs1, aggStepSize, db1, erigon_log.New())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = agg1.OpenFolder()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	agg2, err = erigon_state.NewAggregator2(context.Background(), dirs2, aggStepSize, db2, erigon_log.New())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = agg2.OpenFolder()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	agg3, err = erigon_state.NewAggregator2(context.Background(), dirs3, aggStepSize, db3, erigon_log.New())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = agg3.OpenFolder()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	ac1 = agg1.BeginFilesRo()
+	ac2 = agg2.BeginFilesRo()
+	ac3 = agg3.BeginFilesRo()
+
+	tx1, err = db1.BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	tx2, err = db2.BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	tx3, err = db3.BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	sd1, err = erigon_state.NewSharedDomains(WrapTxWithCtx(tx1, ac1), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	sd2, err = erigon_state.NewSharedDomains(WrapTxWithCtx(tx2, ac2), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	sd3, err = erigon_state.NewSharedDomains(WrapTxWithCtx(tx3, ac3), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	hph1 = sd1.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+	hph2 = sd2.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+	hph3 = sd3.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+
+	hph1.SetState(b1)
+	hph2.SetState(b2)
+	hph3.SetState(b3)
+
+	hash1, err := hph1.RootHash()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	fmt.Printf("hash1: %x\n", hash1)
+	hash2, err := hph2.RootHash()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	fmt.Printf("hash2: %x\n", hash2)
+	hash3, err := hph3.RootHash()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	fmt.Printf("hash3: %x\n", hash3)
+
+	sd1.Close()
+	sd2.Close()
+	sd3.Close()
+	tx1.Rollback()
+	tx2.Rollback()
+	tx3.Rollback()
+	ac1.Close()
+	ac2.Close()
+	ac3.Close()
+	db1.Close()
+	db2.Close()
+	db3.Close()
+
+	t.Fail()
+}
+
+func TestReopenFromScratch(t *testing.T) {
+	aggStepSize := uint64(config3.DefaultStepSize)
+	aggStepSize = uint64(1)
+	//fmt.Printf("os.TempDir(): %s\n", os.TempDir())
+	tmp, _ := os.MkdirTemp(os.TempDir(), "flatdata")
+	//tmp := string("/tmp/flatdata3")
+	fmt.Printf("tmp: %s\n", tmp)
+	dirs := datadir.New(tmp)
+	db := mdbx.New(erigon_kv.ChainDB, nil).
+		Path(dirs.Chaindata).
+		Exclusive(false).
+		MustOpen()
+	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, aggStepSize, db, erigon_log.New())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = agg.OpenFolder()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	agg.DisableFsync()
+
+	tx, err := db.BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	ac := agg.BeginFilesRo()
+
+	sd, err := erigon_state.NewSharedDomains(WrapTxWithCtx(tx, ac), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	acc := genRandomAccount()
+	//buf := make([]byte, acc.EncodingLengthForHashing())
+	//acc.EncodeForHashing(buf)
+	buf := accounts.SerialiseV3(&acc)
+
+	err = sd.DomainPut(erigon_kv.AccountsDomain, common.Hex2Bytes("0000000000000000000000000000000000000400"), nil, common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"), nil, 0)
+	fmt.Printf("buf: %x\n", buf)
+	//err = sd.DomainPut(erigon_kv.AccountsDomain, common.Hex2Bytes("0000000000000000000000000000000000000400"), nil, buf, nil, 0)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	hash1, err := sd.ComputeCommitment(context.Background(), true, 0, "asdf")
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	fmt.Printf("hash: %x\n", hash1)
+	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+	bbb, err := hph.EncodeCurrentState(nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = sd.Flush(context.Background(), tx)
+	if err != nil {
+		panic(err)
+		//return err
+	}
+	err = tx.Commit()
+	if err != nil {
+		panic(err)
+		//return err
+	}
+	err = agg.BuildFiles(1)
+	if err != nil {
+		panic(err)
+		//return err
+	}
+
+	b, err := hph.EncodeCurrentState(nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	if !bytes.Equal(b, bbb) {
+		t.Errorf("expected %x got %x", bbb, b)
+	}
+
+	sd.Close()
+	ac.Close()
+	// commit? rollback?
+	//tx.Rollback()
+	agg.Close()
+	db.Close()
+
+	newdb := mdbx.New(erigon_kv.ChainDB, nil).
+		Path(dirs.Chaindata).
+		Exclusive(false).
+		MustOpen()
+	newagg, err := erigon_state.NewAggregator2(context.Background(), dirs, aggStepSize, newdb, erigon_log.New())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	err = newagg.OpenFolder()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	newagg.DisableFsync()
+
+	tx, err = newdb.BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	ac = newagg.BeginFilesRo()
+	newsd, err := erigon_state.NewSharedDomains(WrapTxWithCtx(tx, ac), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	hph = newsd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+	bb, err := hph.EncodeCurrentState(nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	if !bytes.Equal(bb, b) {
+		t.Errorf("expected %x got %x", b, bb)
+	}
+	//hph.SetState(b)
+	hash2, err := hph.RootHash()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	fmt.Printf("hash2: %x\n", hash2)
+	val, _, err := newsd.GetLatest(erigon_kv.AccountsDomain, common.Hex2Bytes("0000000000000000000000000000000000000400"))
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	fmt.Printf("val: %x\n", val)
+	//_, err = newsd.SeekCommitment(context.Background(), tx)
+	//if err != nil {
+	//	t.Errorf("expected nil got %v", err)
+	//}
+	txnum := newsd.TxNum()
+	fmt.Printf("txnum: %d\n", txnum)
+	hash3, err := hph.RootHash()
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	fmt.Printf("hash3: %x\n", hash3)
+	//hash, err := sd.ComputeCommitmentWithoutReset(context.Background(), true, 0, "asdf")
+	hash, err := newsd.ComputeCommitment(context.Background(), true, 0, "asdf")
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	fmt.Printf("hash4: %x\n", hash)
+	if !bytes.Equal(hash, common.Hex2Bytes("fbf14f63f97468e460a42b309bbad44fdc682ab3a7f95fa5d3508c9cf0009946")) {
+		t.Errorf("expected fbf14f63f97468e460a42b309bbad44fdc682ab3a7f95fa5d3508c9cf0009946 got %x", hash)
+	}
+	t.Fail()
+}
+func TestReopen(t *testing.T) {
+	dir, _ := os.MkdirTemp(os.TempDir(), "test")
+	dbm := database.NewDBManager(&database.DBConfig{
+		SingleDB: false,
+		Dir:      dir,
+	})
+
+	tx, err := dbm.GetFlatDB().BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	agg := dbm.GetAgg()
+	ac := agg.BeginFilesRo()
+
+	sd, err := erigon_state.NewSharedDomains(WrapTxWithCtx(tx, ac), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	err = sd.DomainPut(erigon_kv.AccountsDomain, common.Hex2Bytes("0000000000000000000000000000000000000400"), nil, common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"), nil, 0)
+	if err != nil {
+		panic(err)
+	}
+	//err = sd.DomainPut(erigon_kv.StorageDomain, common.Hex2Bytes("4937a6f664630547f6b0c3c235c4f03a64ca36b1"), nil, common.Hex2Bytes("01da8095446c3b15f9926687d2c40534fdb5640000000000008001c0"), nil, 0)
+	//if err != nil {
+	//	panic(err)
+	//}
+	err = sd.Flush(context.Background(), tx)
+	if err != nil {
+		panic(err)
+		//return err
+	}
+	err = tx.Commit()
+	if err != nil {
+		panic(err)
+		//return err
+	}
+	err = agg.BuildFiles(0)
+	if err != nil {
+		panic(err)
+		//return err
+	}
+
+	sd.Close()
+	ac.Close()
+	// commit? rollback?
+	tx.Commit()
+
+	tx, err = dbm.GetFlatDB().BeginRw(context.Background())
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	ac = agg.BeginFilesRo()
+	sd, err = erigon_state.NewSharedDomains(WrapTxWithCtx(tx, ac), nil)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+
+	hash, err := sd.ComputeCommitmentWithoutReset(context.Background(), true, 0, "asdf")
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	fmt.Printf("hash: %x\n", hash)
+	if !bytes.Equal(hash, common.Hex2Bytes("fbf14f63f97468e460a42b309bbad44fdc682ab3a7f95fa5d3508c9cf0009946")) {
+		t.Errorf("expected fbf14f63f97468e460a42b309bbad44fdc682ab3a7f95fa5d3508c9cf0009946 got %x", hash)
+	}
 }
 
 func TestProve(t *testing.T) {

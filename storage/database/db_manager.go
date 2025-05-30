@@ -20,13 +20,11 @@ package database
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -34,11 +32,8 @@ import (
 	"sync"
 
 	"github.com/dgraph-io/badger"
-	"github.com/erigontech/erigon-lib/common/datadir"
-	config3 "github.com/erigontech/erigon-lib/config3"
 	erigon_kv "github.com/erigontech/erigon-lib/kv"
 	"github.com/erigontech/erigon-lib/kv/mdbx"
-	temporal "github.com/erigontech/erigon-lib/kv/temporal"
 	erigon_log "github.com/erigontech/erigon-lib/log/v3"
 	erigon_state "github.com/erigontech/erigon-lib/state"
 	"github.com/kaiachain/kaia/blockchain/types"
@@ -126,7 +121,9 @@ type DBManager interface {
 	GetMiscDB() Database
 	GetSnapshotDB() Database
 	GetFlatDB() erigon_kv.RwDB
-	GetRWTx() erigon_kv.RwTx
+	GetRWTx() erigon_kv.Tx
+	GetFlatMu() *sync.RWMutex
+	GetAgg() *erigon_state.Aggregator
 	// from accessors_chain.go
 	ReadCanonicalHash(number uint64) common.Hash
 	WriteCanonicalHash(hash common.Hash, number uint64)
@@ -478,7 +475,9 @@ type databaseManager struct {
 	dbs    []Database
 	cm     *cacheManager
 	flatkv erigon_kv.RwDB
-	rwtx   erigon_kv.RwTx
+	rwtx   erigon_kv.Tx
+	flatMu *sync.RWMutex
+	agg    *erigon_state.Aggregator
 
 	// TODO-Kaia need to refine below.
 	// -merge status variable
@@ -500,6 +499,7 @@ func NewMemoryDBManager() DBManager {
 
 	rwdb := mdbx.New(erigon_kv.ChainDB, nil).InMem("").MustOpen()
 	dbm.flatkv = rwdb
+	dbm.flatMu = &sync.RWMutex{}
 
 	return &dbm
 }
@@ -602,29 +602,41 @@ func databaseDBManager(dbc *DBConfig) (*databaseManager, error) {
 		dbm.dbs[et] = db
 		db.Meter(dbMetricPrefix + dbBaseDirs[et] + "/") // Each database collects metrics independently.
 	}
+	/*fmt.Printf("create flatkv\n")
+	dirs := datadir.New(path.Join(dbc.Dir, "flatdata"))
 	rwdb := mdbx.New(erigon_kv.ChainDB, &logWrapper{logger}).
-		Path(filepath.Join(dbc.Dir, "flatkv")).
+		//Path(path.Join(dirs.Chaindata, "flatkv")).
+		Path(dirs.Chaindata).
 		Exclusive(false).
 		MustOpen()
 	dbm.flatkv = rwdb
-	dirs := datadir.New(path.Join("/tmp", "flatdata"))
+
 	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, config3.DefaultStepSize, rwdb, nil)
 	if err != nil {
 		panic(err)
 	}
-	if err := agg.OpenFolder(); err != nil {
+	dbm.agg = agg
+	err = agg.OpenFolder()
+	if err != nil {
+		panic(err)
+	}
+	agg.DisableFsync()*/
+
+	/*if err := agg.OpenFolder(); err != nil {
 		panic(err)
 	}
 	tempdb, err := temporal.New(rwdb, agg)
 	if err != nil {
 		panic(err)
 	}
-	dbm.flatkv = tempdb
-	/*rwtx, err := tempdb.BeginRw(context.Background())
+	dbm.flatkv = tempdb*/
+
+	/*rwtx, err := tempdb.BeginTemporalRw(context.Background())
 	if err != nil {
 		panic(err)
 	}
 	dbm.rwtx = rwtx*/
+	dbm.flatMu = &sync.RWMutex{}
 	return dbm, nil
 }
 
@@ -1001,8 +1013,16 @@ func (dbm *databaseManager) GetFlatDB() erigon_kv.RwDB {
 	return dbm.flatkv
 }
 
-func (dbm *databaseManager) GetRWTx() erigon_kv.RwTx {
+func (dbm *databaseManager) GetRWTx() erigon_kv.Tx {
 	return dbm.rwtx
+}
+
+func (dbm *databaseManager) GetFlatMu() *sync.RWMutex {
+	return dbm.flatMu
+}
+
+func (dbm *databaseManager) GetAgg() *erigon_state.Aggregator {
+	return dbm.agg
 }
 
 func (dbm *databaseManager) TryCatchUpWithPrimary() error {
