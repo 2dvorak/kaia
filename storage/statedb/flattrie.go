@@ -25,7 +25,6 @@ import (
 	"path"
 	"sync"
 
-	"github.com/c2h5oh/datasize"
 	"github.com/erigontech/erigon-lib/commitment"
 	"github.com/erigontech/erigon-lib/common/datadir"
 	"github.com/erigontech/erigon-lib/config3"
@@ -169,10 +168,9 @@ func init() {
 type FlatTrie struct {
 	//TrieOpts
 
-	tx        erigon_kv.Tx
-	rwdb      erigon_kv.RwDB
-	dbm       database.DBManager
-	changeset *erigon_state.StateChangeSet
+	tx   erigon_kv.Tx
+	rwdb erigon_kv.RwDB
+	dbm  database.DBManager
 
 	// change this to uint64
 	num        *big.Int
@@ -189,11 +187,10 @@ type FlatTrie struct {
 
 func NewFlatTrieWithDBManager(db database.DBManager) (*FlatTrie, error) {
 	return &FlatTrie{
-		rwdb:      db.GetFlatDB(),
-		num:       big.NewInt(0),
-		dbm:       db,
-		diff:      make(map[string][]byte),
-		changeset: &erigon_state.StateChangeSet{},
+		rwdb: db.GetFlatDB(),
+		num:  big.NewInt(0),
+		dbm:  db,
+		diff: make(map[string][]byte),
 	}, nil
 }
 
@@ -339,14 +336,12 @@ func WrapTxWithCtx(tx erigon_kv.Tx, ctx *erigon_state.AggregatorRoTx) *txWithCtx
 }
 func (tx *txWithCtx) AggTx() any { return tx.ac }
 
-func (t *FlatTrie) getSd() (*erigon_state.SharedDomains, erigon_kv.RwTx, *erigon_state.AggregatorRoTx, *erigon_state.Aggregator, erigon_kv.RwDB, error) {
-	aggStepSize := uint64(20)
+func (t *FlatTrie) getSd() (*erigon_state.SharedDomains, *erigon_state.AggregatorRoTx, erigon_kv.RwTx, *erigon_state.Aggregator, erigon_kv.RwDB, error) {
+	aggStepSize := uint64(1)
 	dirs := datadir.New(path.Join(t.dbm.GetDBConfig().Dir, "flatdata"))
 	db := mdbx.New(erigon_kv.ChainDB, nil).
-		//Path(dirs.Chaindata).
-		InMem(dirs.Chaindata).
-		GrowthStep(32 * datasize.MB).
-		MapSize(2 * datasize.GB).
+		Path(dirs.Chaindata).
+		//Exclusive(false).
 		MustOpen()
 	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, aggStepSize, db, nil)
 	if err != nil {
@@ -361,24 +356,23 @@ func (t *FlatTrie) getSd() (*erigon_state.SharedDomains, erigon_kv.RwTx, *erigon
 	}
 	agg.DisableFsync()
 
-	ac := agg.BeginFilesRo()
 	tx, err := db.BeginRw(context.Background())
 	if err != nil {
-		ac.Close()
 		agg.Close()
 		db.Close()
 		return nil, nil, nil, nil, nil, err
 	}
+	ac := agg.BeginFilesRo()
 
 	sd, err := erigon_state.NewSharedDomains(WrapTxWithCtx(tx, ac), nil)
 	if err != nil {
-		tx.Rollback()
 		ac.Close()
+		tx.Rollback()
 		agg.Close()
 		db.Close()
 		return nil, nil, nil, nil, nil, err
 	}
-	return sd, tx, ac, agg, db, nil
+	return sd, ac, tx, agg, db, nil
 }
 
 // 1. Read from t.diff at (key)
@@ -433,21 +427,24 @@ func (t *FlatTrie) tryGetSD(key []byte) ([]byte, error) {
 func (t *FlatTrie) tryGetNewSD(key []byte) ([]byte, error) {
 	t.dbm.GetFlatMu().Lock()
 	defer t.dbm.GetFlatMu().Unlock()
-	sd, tx, ac, agg, db, err := t.getSd()
+	sd, ac, tx, agg, db, err := t.getSd()
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
 	defer agg.Close()
-	defer ac.Close()
 	defer tx.Rollback()
+	defer ac.Close()
 	defer sd.Close()
 
 	val, _, err := sd.GetLatest(erigon_kv.AccountsDomain, key)
 	if err != nil {
 		return nil, err
 	}
-	return val, nil
+	fmt.Printf("tryGetNewSD key: %x, val: %x\n", key, val)
+	buf := make([]byte, len(val))
+	copy(buf[:], val)
+	return buf, nil
 }
 
 // update 할때 diff map에 저장하고, hph 만들어서 process 까지
@@ -536,15 +533,15 @@ func (t *FlatTrie) tryUpdateNewSD(key, value []byte) error {
 
 	t.dbm.GetFlatMu().Lock()
 	defer t.dbm.GetFlatMu().Unlock()
-	sd, tx, ac, agg, db, err := t.getSd()
+	sd, ac, tx, agg, db, err := t.getSd()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 	defer agg.Close()
-	defer ac.Close()
 	// comit? rollback?
-	defer tx.Commit()
+	defer tx.Rollback()
+	defer ac.Close()
 	defer sd.Close()
 
 	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
@@ -569,10 +566,10 @@ func (t *FlatTrie) tryUpdateNewSD(key, value []byte) error {
 	if err != nil {
 		return err
 	}
-	err = agg.BuildFiles(10)
+	/*err = agg.BuildFiles(1)
 	if err != nil {
 		return err
-	}
+	}*/
 	buf, err := hph.EncodeCurrentState(nil)
 	if err != nil {
 		return err
@@ -676,7 +673,7 @@ func (t *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) {
 func (t *FlatTrie) tryCommitNewSD(cb LeafCallback) (common.Hash, error) {
 	t.dbm.GetFlatMu().Lock()
 	defer t.dbm.GetFlatMu().Unlock()
-	sd, tx, ac, agg, db, err := t.getSd()
+	sd, ac, tx, agg, db, err := t.getSd()
 	if err != nil {
 		return common.Hash{}, err
 	}
@@ -687,7 +684,6 @@ func (t *FlatTrie) tryCommitNewSD(cb LeafCallback) (common.Hash, error) {
 	defer sd.Close()
 
 	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
-	fmt.Printf("tryCommitNewSD hphBuf: %x\n", t.hphBuf)
 	hph.SetState(t.hphBuf)
 
 	// Instead of saving state, save state to hphBuf
@@ -899,15 +895,15 @@ func (it *flatTrieIterator) Next(descend bool) bool {
 	// Get the next entry from the trie
 	it.trie.dbm.GetFlatMu().Lock()
 	defer it.trie.dbm.GetFlatMu().Unlock()
-	sd, tx, ac, agg, db, err := it.trie.getSd()
+	sd, ac, tx, agg, db, err := it.trie.getSd()
 	if err != nil {
 		it.err = err
 		return false
 	}
 	defer db.Close()
 	defer agg.Close()
-	defer ac.Close()
 	defer tx.Rollback()
+	defer ac.Close()
 	defer sd.Close()
 
 	val, _, err := sd.GetLatest(erigon_kv.AccountsDomain, key)

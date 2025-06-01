@@ -307,7 +307,8 @@ func TestTest(t *testing.T) {
 }
 
 func newEmptyFlatTrieWithDBManager() *FlatTrie {
-	dir, _ := os.MkdirTemp(os.TempDir(), "test")
+	dir, _ := os.MkdirTemp(os.TempDir(), "flat-trie-test")
+	fmt.Printf("tmp: %s\n", dir)
 	dbm := database.NewDBManager(&database.DBConfig{
 		SingleDB: false,
 		Dir:      dir,
@@ -325,13 +326,17 @@ func TestKairosButWithEthData(t *testing.T) {
 	// ?? 0d3cf586ed4fb6fe6b0b8ed5652b1876b97427621f8cfb400b6581f5c6530c1b
 	trie := newEmptyFlatTrieWithDBManager()
 	acclist := make([][]byte, 0)
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 1; i++ {
 		acc := accounts.Account{
-			Nonce:       uint64(i + 100_000),
-			Balance:     *uint256.NewInt(uint64((i + 2) * 100_000)),
-			CodeHash:    erigon_common.Hash{},
-			Incarnation: 3,
+			//Initialised: true,
+			Nonce:    uint64(i + 100_000),
+			Balance:  *uint256.NewInt(uint64((i + 2) * 100_000)),
+			CodeHash: erigon_common.Hash{},
+			//CodeHash:    erigon_common.Hash(crypto.Keccak256Hash(nil).Bytes()),
+			//Root:        erigon_common.Hash(types.EmptyRootHash.Bytes()),
+			Incarnation: 0,
 		}
+		//acc := genRandomAccount()
 		acclist = append(acclist, accounts.SerialiseV3(&acc))
 	}
 	addrlist := make([]common.Address, 0)
@@ -342,7 +347,7 @@ func TestKairosButWithEthData(t *testing.T) {
 	//_ = buf
 	//buf2 := make([]byte, acc.EncodingLengthForHashing())
 	//acc.EncodeForHashing(buf2)
-	tryEthEncoding := true
+	tryEthEncoding := false
 	if !tryEthEncoding {
 		if err = trie.TryUpdate(common.Hex2Bytes("0000000000000000000000000000000000000400"), common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980")); err != nil {
 			t.Errorf("expected nil got %v", err)
@@ -377,8 +382,9 @@ func TestKairosButWithEthData(t *testing.T) {
 				//break
 			}
 			//56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421
-			//42c4607dbe299f769209a9ea17e1c7afc602b48310d3cc0a524dfe0eae3383a6
-			//dcdbc026a6296697789d028072f0a9f0021488ad13eb0f7ab68d143db0b711cd
+			//848e891a7e2d57bb9a863fc01587c2e7bb0b97cae4d3db595dec8e36c8e1dd0c
+			//b9f66642321fa2665fb7cca5d594d86f5b79620b2c076c475bb56bbc0afd47de
+			//e02f53e7055b957bac2de39e10a0007aaa741c5c2f45ba87536d9f04f46329a8
 			sc.TryUpdate(addrlist[i].Bytes(), acc)
 		}
 	}
@@ -1034,9 +1040,9 @@ func TestReopenFromScratch(t *testing.T) {
 	//acc.EncodeForHashing(buf)
 	buf := accounts.SerialiseV3(&acc)
 
-	err = sd.DomainPut(erigon_kv.AccountsDomain, common.Hex2Bytes("0000000000000000000000000000000000000400"), nil, common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"), nil, 0)
-	fmt.Printf("buf: %x\n", buf)
-	//err = sd.DomainPut(erigon_kv.AccountsDomain, common.Hex2Bytes("0000000000000000000000000000000000000400"), nil, buf, nil, 0)
+	//err = sd.DomainPut(erigon_kv.AccountsDomain, common.Hex2Bytes("0000000000000000000000000000000000000400"), nil, common.Hex2Bytes("02f849c580808003c0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a06c39846f5ab402760078b7bfd16c99e687c75bcb5ec65ac8f3054bad18136f0980"), nil, 0)
+	//fmt.Printf("buf: %x\n", buf)
+	err = sd.DomainPut(erigon_kv.AccountsDomain, common.Hex2Bytes("0000000000000000000000000000000000000400"), nil, buf, nil, 0)
 	if err != nil {
 		t.Errorf("expected nil got %v", err)
 	}
@@ -1113,7 +1119,8 @@ func TestReopenFromScratch(t *testing.T) {
 	if !bytes.Equal(bb, b) {
 		t.Errorf("expected %x got %x", b, bb)
 	}
-	//hph.SetState(b)
+	fmt.Printf("Setting state\n")
+	hph.SetState(b)
 	hash2, err := hph.RootHash()
 	if err != nil {
 		t.Errorf("expected nil got %v", err)
