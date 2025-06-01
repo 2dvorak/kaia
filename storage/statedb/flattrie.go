@@ -194,70 +194,6 @@ func NewFlatTrieWithDBManager(db database.DBManager) (*FlatTrie, error) {
 	}, nil
 }
 
-func NewFlatTrie3(kv erigon_kv.Tx) (*FlatTrie, error) {
-	sd, err := erigon_state.NewSharedDomains(kv, nil)
-	if err != nil {
-		return nil, err
-	}
-	return &FlatTrie{
-		sd:  sd,
-		tx:  kv,
-		hph: sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed),
-		num: big.NewInt(0),
-	}, nil
-}
-
-func NewFlatTrie2(db *Database, opts *TrieOpts) (*FlatTrie, error) {
-	if opts == nil {
-		opts = &TrieOpts{PruningBlockNumber: 0}
-	}
-	t := &FlatTrie{
-		num:  big.NewInt(int64(opts.PruningBlockNumber)),
-		diff: make(map[string][]byte),
-	}
-
-	sd, err := openDB(db.diskDB.GetDBConfig().Dir)
-	if err != nil {
-		return nil, err
-	}
-	t.sd = sd
-	t.hph = t.sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
-
-	return t, nil
-}
-
-// baseDir shall be $DATA_DIR/klay/chaindata
-func openDB(baseDir string) (*erigon_state.SharedDomains, error) {
-	/*
-		opts := mdbx.New(erigon_kv.ChainDB, nil).
-			Accede(true)
-		opts = opts.Path(path.Join(baseDir, "flatstate")) // flatstate, flatdata 둘 중 하나는 상관없을지도?
-		db, err := opts.Open(context.Background())
-		if err != nil {
-			return nil, err
-		}*/
-
-	//db := temporaryMdbx
-
-	/*dirs := datadir.New(path.Join(baseDir, "flatdata"))
-	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, config3.DefaultStepSize, db, nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := agg.OpenFolder(); err != nil {
-		return nil, err
-	}
-	tempdb, err := temporal.New(db, agg)
-	if err != nil {
-		return nil, err
-	}
-	tx, err := tempdb.BeginRw(context.Background())
-	if err != nil {
-		return nil, err
-	}*/
-	return erigon_state.NewSharedDomains(rwtx, nil)
-}
-
 func NewFlatTrie(db database.Database, opts *TrieOpts) (*FlatTrie, error) {
 	if opts == nil {
 		opts = &TrieOpts{PruningBlockNumber: 0}
@@ -266,11 +202,6 @@ func NewFlatTrie(db database.Database, opts *TrieOpts) (*FlatTrie, error) {
 		num:  big.NewInt(int64(opts.PruningBlockNumber)),
 		diff: make(map[string][]byte),
 	}
-	/*mdbxopts := mdbx.New("flatkv", nil)
-	rw, err := mdbxopts.Open(context.Background())
-	if err != nil {
-		return nil, err
-	}*/
 
 	mdbx, err := mdbx.NewTemporaryMdbx(context.Background(), "/tmp")
 	if err != nil {
@@ -299,8 +230,6 @@ func NewFlatTrie(db database.Database, opts *TrieOpts) (*FlatTrie, error) {
 	}
 	t.sd.GetCommitmentContext().Reset()
 	t.hph = t.sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
-	//t.hph = NewHexPatriciaHashed(common.AddressLength, nil, "/tmp", t.sd)
-	//t.hph.ResetContext(t.sd.GetCommitmentContext())
 
 	return t, nil
 }
