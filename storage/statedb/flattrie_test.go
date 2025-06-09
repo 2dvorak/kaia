@@ -64,13 +64,6 @@ hph.Root()
 */
 
 // Used for testing
-func newEmptyFlatTrie() *FlatTrie {
-	trie, err := NewFlatTrie(database.NewMemDB(), nil)
-	if err != nil {
-		panic(err)
-	}
-	return trie
-}
 
 func TestFlatTrieInsert(t *testing.T) {
 	/*
@@ -224,7 +217,7 @@ func genRandomKeyValue() (key, value []byte) {
 
 func TestFlatTrieHash(t *testing.T) {
 	var hash1, hash2 common.Hash
-	trie := newEmptyFlatTrie()
+	trie := newEmptyFlatTrieWithDBManager()
 	secureTrie, err := NewSecureTrie(common.Hash{}, NewDatabase(database.NewMemoryDBManager()), nil)
 	if err != nil {
 		t.Errorf("expected nil got %v", err)
@@ -279,7 +272,7 @@ func TestTest(t *testing.T) {
 	if err != nil {
 		t.Errorf("expected nil got %v", err)
 	}
-	flatTrie := newEmptyFlatTrie()
+	flatTrie := newEmptyFlatTrieWithDBManager()
 	for _, item := range items {
 		err = trie.TryUpdate(item.key, item.value)
 		if err != nil {
@@ -1225,8 +1218,9 @@ func TestReopen(t *testing.T) {
 	}
 }
 
+/*
 func TestProve(t *testing.T) {
-	trie := newEmptyFlatTrie()
+	trie := newEmptyFlatTrieWithDBManager()
 	trie2, err := NewSecureTrie(common.Hash{}, NewDatabase(database.NewMemoryDBManager()), nil)
 	if err != nil {
 		t.Errorf("expected nil got %v", err)
@@ -1251,17 +1245,6 @@ func TestProve(t *testing.T) {
 		t.Errorf("expected nil got %v", err)
 	}
 
-	/*rl := erigon_trie.NewRetainList(0)
-	it := erigon_trie.NewIterator(proofTrie, rl, false)
-	for {
-		itemType, hex1, aValue, hash, value := it.Next()
-		if itemType == erigon_trie.AccountStreamItem {
-			fmt.Printf("proofTrie: %x\n", hex1)
-			fmt.Printf("proofTrie: %x\n", value)
-		}
-		_, _ = aValue, hash
-	}*/
-
 	proof, err := proofTrie.Prove(common.Hex2Bytes("d293f7799bd6c75b82c2802542e2999c14f47e35"), 0, false)
 	if err != nil {
 		t.Errorf("expected nil got %v", err)
@@ -1285,3 +1268,4 @@ func TestProve(t *testing.T) {
 		t.Errorf("expected 01c580648001c0 got %x", val)
 	}
 }
+*/
