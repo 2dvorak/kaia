@@ -172,7 +172,7 @@ type cachingDB struct {
 // OpenTrie opens the main account trie at a specific root hash.
 func (db *cachingDB) OpenTrie(root common.Hash, opts *statedb.TrieOpts) (Trie, error) {
 	if common.FlatTrie {
-		return statedb.NewFlatTrieWithDBManager(db.db.DiskDB())
+		return statedb.NewFlatTrieWithDBManager(db.db.DiskDB(), opts)
 	} else {
 		return statedb.NewSecureTrie(root, db.db, opts)
 	}

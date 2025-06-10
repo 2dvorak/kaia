@@ -138,7 +138,13 @@ type FlatTrie struct {
 	hphBuf   []byte
 }
 
-func NewFlatTrieWithDBManager(db database.DBManager) (*FlatTrie, error) {
+func NewFlatTrieWithDBManager(db database.DBManager, opts *TrieOpts) (*FlatTrie, error) {
+	if opts != nil {
+		return &FlatTrie{
+			num: opts.TrieBlockNumber,
+			dbm: db,
+		}, nil
+	}
 	return &FlatTrie{
 		num: 0,
 		dbm: db,
@@ -221,11 +227,20 @@ func (t *FlatTrie) TryGet(key []byte) ([]byte, error) {
 	defer ac.Close()
 	defer sd.Close()
 
-	val, _, err := sd.GetLatest(erigon_kv.AccountsDomain, key)
+	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+	hph.SetState(t.hphBuf)
+
+	//sd.SetTxNum(t.num)
+	//sd.SetBlockNum(t.num)
+	val, _, err := ac.GetAsOf(tx, erigon_kv.AccountsDomain, key, t.num)
 	if err != nil {
 		return nil, err
 	}
-	// TODO-Kaia: I don't know why but this was needed
+	/*val, _, err := sd.GetLatest(erigon_kv.AccountsDomain, key)
+	if err != nil {
+		return nil, err
+	}*/
+	// TODO-Kaia: I don't know why but this was needed?
 	buf := make([]byte, len(val))
 	copy(buf[:], val)
 	return buf, nil
@@ -247,6 +262,9 @@ func (t *FlatTrie) TryUpdate(key, value []byte) error {
 
 	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
 	hph.SetState(t.hphBuf)
+
+	//sd.SetTxNum(t.num)
+	//sd.SetBlockNum(t.num)
 
 	err = sd.DomainPut(erigon_kv.AccountsDomain, key, nil, value, nil, 0)
 	if err != nil {
@@ -299,6 +317,9 @@ func (t *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) {
 
 	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
 	hph.SetState(t.hphBuf)
+
+	//sd.SetTxNum(t.num)
+	//sd.SetBlockNum(t.num)
 
 	// Instead of saving state, save state to hphBuf
 	hash, err := sd.ComputeCommitment(context.Background(), false, t.num, "flattrie-commit")
@@ -477,7 +498,46 @@ func (t *FlatTrie) TryUpdateWithKeys(key, hashKey, hexKey, value []byte) error {
 }
 
 func (t *FlatTrie) TryDelete(key []byte) error {
-	return t.TryUpdate(key, nil)
+	//return t.TryUpdate(key, nil)
+	t.dbm.GetFlatMu().Lock()
+	defer t.dbm.GetFlatMu().Unlock()
+	sd, ac, tx, agg, db, err := t.getSd()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	defer agg.Close()
+	defer tx.Rollback()
+	defer ac.Close()
+	defer sd.Close()
+
+	hph := sd.GetCommitmentContext().Trie().(*commitment.HexPatriciaHashed)
+	hph.SetState(t.hphBuf)
+
+	sd.SetTxNum(t.num)
+	sd.SetBlockNum(t.num)
+
+	err = sd.DomainDel(erigon_kv.AccountsDomain, key, nil, nil, 0)
+	if err != nil {
+		return err
+	}
+
+	err = sd.Flush(context.Background(), tx)
+	if err != nil {
+		return err
+	}
+	err = tx.Commit()
+	if err != nil {
+		return err
+	}
+
+	buf, err := hph.EncodeCurrentState(nil)
+	if err != nil {
+		return err
+	}
+	t.hphBuf = make([]byte, len(buf))
+	copy(t.hphBuf, buf)
+	return nil
 }
 
 func (t *FlatTrie) Copy() *FlatTrie {

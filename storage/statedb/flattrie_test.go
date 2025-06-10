@@ -310,7 +310,7 @@ func newEmptyFlatTrieWithDBManager() *FlatTrie {
 		Dir:      dir,
 	})
 
-	trie, err := NewFlatTrieWithDBManager(dbm)
+	trie, err := NewFlatTrieWithDBManager(dbm, nil)
 	if err != nil {
 		panic(err)
 	}
