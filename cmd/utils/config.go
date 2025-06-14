@@ -639,6 +639,9 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 	cfg.LivePruning = ctx.Bool(LivePruningFlag.Name)
 	cfg.LivePruningRetention = ctx.Uint64(LivePruningRetentionFlag.Name)
 
+	if ctx.IsSet(FlatTrieFlag.Name) {
+		common.FlatTrie = true
+	}
 	if ctx.IsSet(CacheScaleFlag.Name) {
 		common.CacheScale = ctx.Int(CacheScaleFlag.Name)
 	}

@@ -52,6 +52,9 @@ var (
 
 	// MaxHash represents the maximum possible hash value.
 	MaxHash = HexToHash("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+
+	// TODO-Kaia: temporary flag for FlatTrie
+	FlatTrie bool
 )
 
 var (

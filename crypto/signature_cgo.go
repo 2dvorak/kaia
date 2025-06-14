@@ -30,7 +30,9 @@ import (
 	"fmt"
 
 	"github.com/kaiachain/kaia/common/math"
-	"github.com/kaiachain/kaia/crypto/secp256k1"
+	// Replace kaia/crypto/secp256k1 to erigontech/secp256k1 to avoid duplicate cgo symbols
+	//"github.com/kaiachain/kaia/crypto/secp256k1"
+	"github.com/erigontech/secp256k1"
 )
 
 // Ecrecover returns the uncompressed public key that created the given signature.

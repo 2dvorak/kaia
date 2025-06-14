@@ -39,7 +39,10 @@ import (
 
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/crypto"
-	"github.com/kaiachain/kaia/crypto/secp256k1"
+
+	// Replace kaia/crypto/secp256k1 to erigontech/secp256k1 to avoid duplicate cgo symbols
+	//"github.com/kaiachain/kaia/crypto/secp256k1"
+	"github.com/erigontech/secp256k1"
 )
 
 const NodeIDBits = 512
