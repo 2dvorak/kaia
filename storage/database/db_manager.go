@@ -20,11 +20,13 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -39,6 +41,12 @@ import (
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/pkg/errors"
 	"github.com/syndtr/goleveldb/leveldb"
+
+	"github.com/erigontech/erigon-lib/common/datadir"
+	erigon_kv "github.com/erigontech/erigon-lib/kv"
+	"github.com/erigontech/erigon-lib/kv/mdbx"
+	erigon_log "github.com/erigontech/erigon-lib/log/v3"
+	erigon_state "github.com/erigontech/erigon-lib/state"
 )
 
 var (
@@ -75,6 +83,8 @@ type DBManager interface {
 	GetStateTrieMigrationDB() Database
 	GetMiscDB() Database
 	GetSnapshotDB() Database
+	GetFlatMu() *sync.Mutex
+	WithSharedDomains(f func(sd *erigon_state.SharedDomains) bool)
 
 	// from accessors_chain.go
 	ReadCanonicalHash(number uint64) common.Hash
@@ -433,6 +443,17 @@ type databaseManager struct {
 	inMigration          bool
 	migrationBlockNumber uint64
 	migrationOldDBPath   string
+
+	// Mdbx and FlatTrie related
+	flatMu sync.Mutex
+	dbOpen bool
+	db     erigon_kv.RwDB
+	agg    *erigon_state.Aggregator
+
+	txOpen bool
+	ac     *erigon_state.AggregatorRoTx
+	tx     erigon_kv.RwTx
+	sd     *erigon_state.SharedDomains
 }
 
 func NewMemoryDBManager() DBManager {
@@ -546,7 +567,34 @@ func databaseDBManager(dbc *DBConfig) (*databaseManager, error) {
 		dbm.dbs[et] = db
 		db.Meter(dbMetricPrefix + dbBaseDirs[et] + "/") // Each database collects metrics independently.
 	}
+	dbm.flatMu = sync.Mutex{}
+	dirs := datadir.New(path.Join(dbc.Dir, "flattrie")) // TODO-Kaia: use $DATADIR/klay/chaindata/flattrie
+	os.MkdirAll(dirs.Chaindata, 0755)
+	dbm.db, dbm.agg = openKaiaMdbx(dirs)
 	return dbm, nil
+}
+
+func openKaiaMdbx(dirs datadir.Dirs) (erigon_kv.RwDB, *erigon_state.Aggregator) {
+	logger := erigon_log.New() // TODO-Kaia: use kaia logger
+
+	db := mdbx.New(erigon_kv.ChainDB, logger).
+		InMem(dirs.Chaindata). // path to persisted data
+		GrowthStep(32 * 1024 * 1024).
+		MapSize(2 * 1024 * 1024 * 1024).
+		MustOpen()
+
+	aggStep := uint64(10) // ??
+	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, aggStep, db, logger)
+	if err != nil {
+		panic(err)
+	}
+	err = agg.OpenFolder() // ??
+	if err != nil {
+		panic(err)
+	}
+	agg.DisableFsync() // ??
+
+	return db, agg
 }
 
 // newDatabase returns Database interface with given DBConfig.
@@ -576,6 +624,7 @@ func newDatabaseManager(dbc *DBConfig) *databaseManager {
 		config: dbc,
 		dbs:    make([]Database, databaseEntryTypeSize),
 		cm:     newCacheManager(),
+		flatMu: sync.Mutex{},
 	}
 }
 
@@ -918,6 +967,69 @@ func (dbm *databaseManager) GetSnapshotDB() Database {
 	return dbm.getDatabase(SnapshotDB)
 }
 
+// Mdbx and FlatTrie related functions
+func (dbm *databaseManager) GetFlatMu() *sync.Mutex {
+	return &dbm.flatMu
+}
+
+// Init a new erigon.SharedDomains and run f(sd)
+func (dbm *databaseManager) WithSharedDomains(f func(sd *erigon_state.SharedDomains) bool) {
+	dbm.flatMu.Lock()
+	defer dbm.flatMu.Unlock()
+
+	sd := dbm.borrowMdbxTx()
+	commit := f(sd)
+	dbm.returnMdbxTx(commit)
+}
+
+func (dbm *databaseManager) borrowMdbxTx() *erigon_state.SharedDomains {
+	dbm.txOpen = true
+
+	sd, tx, ac := openKaiaSharedDomain(dbm.db, dbm.agg)
+	dbm.ac = ac
+	dbm.tx = tx
+	dbm.sd = sd
+	return sd
+}
+
+func (dbm *databaseManager) returnMdbxTx(commit bool) {
+	if commit {
+		dbm.sd.Flush(context.Background(), dbm.tx)
+		dbm.sd.Close()
+		dbm.tx.Commit()
+		dbm.ac.Close()
+	} else {
+		dbm.sd.Close()
+		dbm.tx.Rollback()
+		dbm.ac.Close()
+	}
+	dbm.txOpen = false
+}
+
+type txWithCtx struct {
+	erigon_kv.Tx
+	ac *erigon_state.AggregatorRoTx
+}
+
+func WrapTxWithCtx(tx erigon_kv.Tx, ctx *erigon_state.AggregatorRoTx) *txWithCtx {
+	return &txWithCtx{Tx: tx, ac: ctx}
+}
+func (tx *txWithCtx) AggTx() any { return tx.ac }
+
+func openKaiaSharedDomain(db erigon_kv.RwDB, agg *erigon_state.Aggregator) (*erigon_state.SharedDomains, erigon_kv.RwTx, *erigon_state.AggregatorRoTx) {
+	logger := erigon_log.New() // TODO-Kaia: use kaia logger
+
+	tx, err := db.BeginRw(context.Background())
+	if err != nil {
+		panic("cannot open mdbx db")
+	}
+
+	aggCtx := agg.BeginFilesRo()
+	wrappedTx := WrapTxWithCtx(tx, aggCtx)
+	sd, err := erigon_state.NewSharedDomains(wrappedTx, logger)
+	return sd, tx, aggCtx
+}
+
 func (dbm *databaseManager) TryCatchUpWithPrimary() error {
 	for _, db := range dbm.dbs {
 		if db != nil {
@@ -1005,6 +1117,19 @@ func (dbm *databaseManager) Close() {
 		if db != nil {
 			db.Close()
 		}
+	}
+
+	dbm.flatMu.Lock()
+	defer dbm.flatMu.Unlock()
+
+	if dbm.txOpen {
+		dbm.sd.Close()
+		dbm.tx.Rollback()
+		dbm.ac.Close()
+	}
+	if dbm.dbOpen {
+		dbm.agg.Close()
+		dbm.db.Close()
 	}
 }
 

@@ -44,10 +44,13 @@ import (
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/crypto/ecies"
-	"github.com/kaiachain/kaia/crypto/secp256k1"
 	"github.com/kaiachain/kaia/crypto/sha3"
 	"github.com/kaiachain/kaia/networks/p2p/discover"
 	"github.com/kaiachain/kaia/rlp"
+
+	// Replace kaia/crypto/secp256k1 to erigontech/secp256k1 to avoid duplicate cgo symbols
+	//"github.com/kaiachain/kaia/crypto/secp256k1"
+	"github.com/erigontech/secp256k1"
 )
 
 // Conn is an RLPx network connection. It wraps a low-level network connection. The
