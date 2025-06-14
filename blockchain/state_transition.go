@@ -289,6 +289,7 @@ func (st *StateTransition) preCheck() error {
 				"accountNonce", nonce, "txNonce", st.msg.Nonce(), "txHash", st.msg.Hash().String())
 			return ErrNonceTooHigh
 		} else if nonce > st.msg.Nonce() {
+			fmt.Printf("ErrNonceTooLow: account: %v, accountNonce: %v, txNonce: %v, txHash: %v\n", st.msg.ValidatedSender().String(), nonce, st.msg.Nonce(), st.msg.Hash().String())
 			logger.Debug(ErrNonceTooLow.Error(), "account", st.msg.ValidatedSender().String(),
 				"accountNonce", nonce, "txNonce", st.msg.Nonce(), "txHash", st.msg.Hash().String())
 			return ErrNonceTooLow

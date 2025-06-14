@@ -286,7 +286,10 @@ func (s *StateDB) GetNonce(addr common.Address) uint64 {
 func (s *StateDB) GetCode(addr common.Address) []byte {
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
+		fmt.Printf("GetCode obj: address: %v, codehash: %x, code: %x\n", addr, stateObject.CodeHash(), stateObject.code)
 		return stateObject.Code(s.db)
+	} else {
+		fmt.Printf("GetCode obj nil: address: %v\n", addr)
 	}
 	return nil
 }
@@ -682,6 +685,7 @@ func (s *StateDB) getDeletedStateObject(addr common.Address) *stateObject {
 		// Load the object from the database.
 		enc, err := s.trie.TryGet(addr[:])
 		if len(enc) == 0 {
+			fmt.Printf("getStateObject enc: address: %v, enc: %x, err: %v\n", addr, enc, err)
 			s.setError(err)
 			return nil
 		}
@@ -695,6 +699,7 @@ func (s *StateDB) getDeletedStateObject(addr common.Address) *stateObject {
 	// Insert into the live set.
 	obj := newObject(s, addr, acc)
 	s.setStateObject(obj)
+	fmt.Printf("getStateObject obj: address: %v, codehash: %x, code: %x\n", addr, obj.CodeHash(), obj.code)
 
 	return obj
 }

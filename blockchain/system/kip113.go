@@ -163,6 +163,7 @@ func ReadKip113All(backend bind.ContractCaller, contractAddr common.Address, num
 	opts := &bind.CallOpts{BlockNumber: num}
 	ret, err := caller.GetAllBlsInfo(opts)
 	if err != nil {
+		panic(err)
 		return nil, err
 	}
 

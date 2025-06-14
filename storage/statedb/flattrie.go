@@ -209,6 +209,8 @@ func (t *FlatTrie) getSd() (*erigon_state.SharedDomains, *erigon_state.Aggregato
 		db.Close()
 		return nil, nil, nil, nil, nil, err
 	}
+	//sd.SetTxNum(t.num)
+	//sd.SetBlockNum(t.num)
 	return sd, ac, tx, agg, db, nil
 }
 
@@ -232,14 +234,14 @@ func (t *FlatTrie) TryGet(key []byte) ([]byte, error) {
 
 	//sd.SetTxNum(t.num)
 	//sd.SetBlockNum(t.num)
-	val, _, err := ac.GetAsOf(tx, erigon_kv.AccountsDomain, key, t.num)
-	if err != nil {
-		return nil, err
-	}
-	/*val, _, err := sd.GetLatest(erigon_kv.AccountsDomain, key)
+	/*val, _, err := ac.GetAsOf(tx, erigon_kv.AccountsDomain, key, t.num)
 	if err != nil {
 		return nil, err
 	}*/
+	val, _, err := sd.GetLatest(erigon_kv.AccountsDomain, key)
+	if err != nil {
+		return nil, err
+	}
 	// TODO-Kaia: I don't know why but this was needed?
 	buf := make([]byte, len(val))
 	copy(buf[:], val)
@@ -247,6 +249,8 @@ func (t *FlatTrie) TryGet(key []byte) ([]byte, error) {
 }
 
 func (t *FlatTrie) TryUpdate(key, value []byte) error {
+	// TODO-Kaia: how can we decide if this is encAccount or code?
+	// code is also stored in the world state..
 	t.dbm.GetFlatMu().Lock()
 	defer t.dbm.GetFlatMu().Unlock()
 	sd, ac, tx, agg, db, err := t.getSd()
