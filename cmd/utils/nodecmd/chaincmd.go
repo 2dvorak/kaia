@@ -70,6 +70,7 @@ var (
 			utils.RocksDBCacheIndexAndFilterFlag,
 			utils.OverwriteGenesisFlag,
 			utils.LivePruningFlag,
+			utils.FlatTrieFlag,
 		},
 		Category: "BLOCKCHAIN COMMANDS",
 		Description: `
