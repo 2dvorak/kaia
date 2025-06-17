@@ -17,7 +17,9 @@
 package statedb
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"sync"
 
 	"github.com/kaiachain/kaia/common"
@@ -136,6 +138,8 @@ func (trie *FlatTrie) getAccount(key []byte) ([]byte, error) {
 
 	var result []byte
 	trie.dbm.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
+		//sd.SetTxNum(trie.num)
+		//sd.SetBlockNum(trie.num)
 		val, _, err := sd.GetLatest(erigon_kv.AccountsDomain, key)
 		if err == nil {
 			result = val
@@ -163,10 +167,12 @@ func (trie *FlatTrie) updateAccount(key, val []byte) error {
 	var err error
 	// TODO: defer hash calculation to trie.Hash() and trie.Commit().
 	trie.dbm.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
+		//sd.SetTxNum(trie.num)
+		//sd.SetBlockNum(trie.num)
 		sdCtx, hph := trie.getInjectedTrie(sd)
 		sdCtx.TouchKey(erigon_kv.AccountsDomain, string(key), val)
 
-		root, err = sd.ComputeCommitment(context.Background(), false, 0, "")
+		root, err = sd.ComputeCommitment(context.Background(), false, trie.num, "")
 
 		trie.root = common.BytesToHash(root)
 		trie.hphState, err = hph.EncodeCurrentState(nil)
@@ -187,6 +193,10 @@ func (trie *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) { // TODO-Kai
 	defer trie.mu.Unlock()
 
 	trie.dbm.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
+		// Try incrementing num before commit, because the first commit would be for block 1, not 0 (genesis)
+		trie.num++
+		sd.SetTxNum(trie.num)
+		sd.SetBlockNum(trie.num)
 		for key, val := range trie.pendingAccounts {
 			sd.DomainPut(erigon_kv.AccountsDomain, []byte(key), nil, val, nil, 0)
 		}
@@ -195,6 +205,14 @@ func (trie *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) { // TODO-Kai
 			sd.DomainPut(erigon_kv.CommitmentDomain, []byte(key), nil, val, nil, 0)
 		}
 		trie.pendingBranches = make(map[string][]byte)
+		// Try Commit and store state
+		root, err := sd.ComputeCommitment(context.Background(), true, trie.num, "")
+		if err != nil {
+			panic("ComputeCommitment failed: " + err.Error())
+		}
+		if !bytes.Equal(root, trie.root.Bytes()) {
+			panic("Commit: root mismatch: " + hex.EncodeToString(root) + " != " + hex.EncodeToString(trie.root.Bytes()))
+		}
 		return true
 	})
 	return trie.root, nil
