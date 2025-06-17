@@ -578,12 +578,14 @@ func openKaiaMdbx(dirs datadir.Dirs) (erigon_kv.RwDB, *erigon_state.Aggregator) 
 	logger := erigon_log.New() // TODO-Kaia: use kaia logger
 
 	db := mdbx.New(erigon_kv.ChainDB, logger).
-		InMem(dirs.Chaindata). // path to persisted data
+		//InMem(dirs.Chaindata). // path to persisted data
+		Path(dirs.Chaindata).
 		GrowthStep(32 * 1024 * 1024).
 		MapSize(2 * 1024 * 1024 * 1024).
 		MustOpen()
 
-	aggStep := uint64(10) // ??
+	// Set aggStep to 1
+	aggStep := uint64(1) // ??
 	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, aggStep, db, logger)
 	if err != nil {
 		panic(err)
@@ -1021,12 +1023,15 @@ func openKaiaSharedDomain(db erigon_kv.RwDB, agg *erigon_state.Aggregator) (*eri
 
 	tx, err := db.BeginRw(context.Background())
 	if err != nil {
-		panic("cannot open mdbx db")
+		panic("cannot open mdbx db: " + err.Error())
 	}
 
 	aggCtx := agg.BeginFilesRo()
 	wrappedTx := WrapTxWithCtx(tx, aggCtx)
 	sd, err := erigon_state.NewSharedDomains(wrappedTx, logger)
+	if err != nil {
+		panic("cannot open shared domains: " + err.Error())
+	}
 	return sd, tx, aggCtx
 }
 
