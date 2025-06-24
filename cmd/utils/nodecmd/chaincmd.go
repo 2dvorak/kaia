@@ -23,10 +23,13 @@
 package nodecmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path"
+	"strconv"
 	"strings"
 
 	"github.com/c2h5oh/datasize"
@@ -40,8 +43,11 @@ import (
 	"github.com/kaiachain/kaia/storage/database"
 	"github.com/urfave/cli/v2"
 
+	"github.com/erigontech/erigon-lib/common/datadir"
 	"github.com/erigontech/erigon-lib/kv"
+	"github.com/erigontech/erigon-lib/kv/mdbx"
 	"github.com/erigontech/erigon-lib/kv/order"
+	erigon_state "github.com/erigontech/erigon-lib/state"
 	erigon_cmd_utils "github.com/erigontech/erigon/cmd/utils"
 	erigon_node "github.com/erigontech/erigon/node"
 	erigon_app "github.com/erigontech/erigon/turbo/app"
@@ -138,6 +144,20 @@ The dumpgenesis command dumps the genesis block configuration in JSON format to 
 		Description: `
 The dbget command dumps the key-value from database.`,
 	}
+
+	KvGetCommand = &cli.Command{
+		Action:    kvGet,
+		Name:      "kvget",
+		Usage:     "Read a key from the flattrie",
+		ArgsUsage: "<dbname> <key> [<blockNum>]",
+		Flags: []cli.Flag{
+			utils.MainnetFlag,
+			utils.KairosFlag,
+		},
+		Category: "BLOCKCHAIN COMMANDS",
+		Description: `
+The kvget command reads a key from the flattrie.`,
+	}
 )
 
 func iterTrie(cliCtx *cli.Context) error {
@@ -177,6 +197,99 @@ func iterTrie(cliCtx *cli.Context) error {
 			}
 			return nil
 		})
+	}
+	return nil
+}
+
+func kvGet(cliCtx *cli.Context) error {
+	dbname := cliCtx.Args().First()
+	key := cliCtx.Args().Get(1)
+	keyBytes, err := hexutil.Decode(key)
+	if err != nil {
+		return fmt.Errorf("Failed to decode key: %v", err)
+	}
+	blockNum := cliCtx.Args().Get(2)
+
+	logger, _, _, _ := debug.Setup(cliCtx, true /* rootLogger */)
+
+	// For compatibility with erigon
+	/*cliCtx.Set(erigon_cmd_utils.DbPageSizeFlag.Name, "4KB")
+	cliCtx.Set(erigon_cmd_utils.DbSizeLimitFlag.Name, (1 * datasize.TB).String())
+	stack, err := erigon_app.MakeNodeWithDefaultConfig(cliCtx, logger)
+	if err != nil {
+		return err
+	}
+	defer stack.Close()
+
+	chaindb, err := erigon_node.OpenDatabase(cliCtx.Context, stack.Config(), kv.ChainDB, "", false, logger)
+	if err != nil {
+		return fmt.Errorf("Failed to open database: %v", err)
+	}
+	defer chaindb.Close()*/
+
+	var domain kv.Domain
+	switch dbname {
+	case "accounts":
+		domain = kv.AccountsDomain
+	case "storage":
+		domain = kv.StorageDomain
+	case "code":
+		domain = kv.CodeDomain
+	case "commitments":
+		domain = kv.CommitmentDomain
+	}
+
+	dirs := datadir.New(path.Join(cliCtx.String(utils.DataDirFlag.Name), "klay/chaindata/flattrie")) // TODO-Kaia: use $DATADIR/klay/chaindata/flattrie
+	fmt.Printf("dirs: %s\n", dirs.Chaindata)
+	os.MkdirAll(dirs.Chaindata, 0755)
+	db := mdbx.New(kv.ChainDB, logger).
+		//InMem(dirs.Chaindata). // path to persisted data
+		Path(dirs.Chaindata).
+		GrowthStep(32 * 1024 * 1024).
+		MapSize(2 * 1024 * 1024 * 1024).
+		MustOpen()
+
+	// Set aggStep to 1
+	aggStep := uint64(1) // ??
+	agg, err := erigon_state.NewAggregator2(context.Background(), dirs, aggStep, db, logger)
+	if err != nil {
+		panic(err)
+	}
+	err = agg.OpenFolder() // ??
+	if err != nil {
+		panic(err)
+	}
+	agg.DisableFsync() // ??
+
+	tx, err := db.BeginRw(context.Background())
+	if err != nil {
+		panic("cannot open mdbx db: " + err.Error())
+	}
+
+	aggCtx := agg.BeginFilesRo()
+	wrappedTx := database.WrapTxWithCtx(tx, aggCtx)
+	sd, err := erigon_state.NewSharedDomains(wrappedTx, logger)
+	if err != nil {
+		panic("cannot open shared domains: " + err.Error())
+	}
+
+	if cliCtx.Args().Len() < 3 {
+		val, _, err := sd.GetLatest(domain, keyBytes)
+		if err != nil {
+			return fmt.Errorf("Failed to get value: %v", err)
+		}
+		fmt.Printf("latest val: %x\n", val)
+	} else {
+		blockNumUint, err := strconv.ParseUint(blockNum, 10, 64)
+		if err != nil {
+			return fmt.Errorf("Failed to parse block number: %v", err)
+		}
+		aggTx := sd.AggTx().(*erigon_state.AggregatorRoTx)
+		val, _, err := aggTx.GetAsOf(sd.Tx(), domain, keyBytes, blockNumUint+1)
+		if err != nil {
+			return fmt.Errorf("Failed to get value: %v", err)
+		}
+		fmt.Printf("block %d val: %x\n", blockNumUint, val)
 	}
 	return nil
 }
