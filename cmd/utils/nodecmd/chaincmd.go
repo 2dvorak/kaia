@@ -33,6 +33,7 @@ import (
 	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/cmd/utils"
+	"github.com/kaiachain/kaia/common/hexutil"
 	headergov_impl "github.com/kaiachain/kaia/kaiax/gov/headergov/impl"
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
@@ -123,6 +124,20 @@ The dumpgenesis command dumps the genesis block configuration in JSON format to 
 			},
 		},
 	}
+
+	DbGetCommand = &cli.Command{
+		Action:    dbGet,
+		Name:      "dbget",
+		Usage:     "Read a key from the underlying key-value database",
+		ArgsUsage: "",
+		Flags: []cli.Flag{
+			utils.MainnetFlag,
+			utils.KairosFlag,
+		},
+		Category: "BLOCKCHAIN COMMANDS",
+		Description: `
+The dbget command dumps the key-value from database.`,
+	}
 )
 
 func iterTrie(cliCtx *cli.Context) error {
@@ -163,7 +178,55 @@ func iterTrie(cliCtx *cli.Context) error {
 			return nil
 		})
 	}
+	return nil
+}
 
+func dbGet(ctx *cli.Context) error {
+	dbname := ctx.Args().First()
+	key := ctx.Args().Get(1)
+
+	// Open an initialise both full and light databases
+	stack := MakeFullNode(ctx)
+	parallelDBWrite := !ctx.Bool(utils.NoParallelDBWriteFlag.Name)
+	singleDB := ctx.Bool(utils.SingleDBFlag.Name)
+	numStateTrieShards := ctx.Uint(utils.NumStateTrieShardsFlag.Name)
+
+	dbtype := database.DBType(ctx.String(utils.DbTypeFlag.Name)).ToValid()
+	if len(dbtype) == 0 {
+		logger.Crit("invalid dbtype", "dbtype", ctx.String(utils.DbTypeFlag.Name))
+	}
+	dbc := &database.DBConfig{
+		Dir: "chaindata", DBType: dbtype, ParallelDBWrite: parallelDBWrite,
+		SingleDB: singleDB, NumStateTrieShards: numStateTrieShards,
+		LevelDBCacheSize: 0, PebbleDBCacheSize: 0, OpenFilesLimit: 0,
+	}
+	chainDB := stack.OpenDatabase(dbc)
+	defer chainDB.Close()
+
+	var dbEntryType database.DBEntryType
+	switch dbname {
+	case "header":
+	case "h":
+		dbEntryType = 1 // headerDB
+	case "body":
+	case "b":
+		dbEntryType = database.BodyDB
+	case "state", "s":
+		dbEntryType = database.StateTrieDB
+	}
+	db := chainDB.GetDatabase(dbEntryType)
+
+	keyBytes, err := hexutil.Decode(key)
+	if err != nil {
+		return err
+	}
+
+	val, err := db.Get(keyBytes)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("%x\n", val)
 	return nil
 }
 

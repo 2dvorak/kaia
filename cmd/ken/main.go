@@ -52,6 +52,7 @@ func init() {
 		nodecmd.InitCommand,
 		nodecmd.DumpGenesisCommand,
 		nodecmd.IterTrieCommand,
+		nodecmd.DbGetCommand,
 
 		// See utils/nodecmd/accountcmd.go
 		nodecmd.AccountCommand,
