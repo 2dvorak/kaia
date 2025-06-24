@@ -25,9 +25,11 @@ package nodecmd
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 
+	"github.com/c2h5oh/datasize"
 	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/cmd/utils"
@@ -36,6 +38,13 @@ import (
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/storage/database"
 	"github.com/urfave/cli/v2"
+
+	"github.com/erigontech/erigon-lib/kv"
+	"github.com/erigontech/erigon-lib/kv/order"
+	erigon_cmd_utils "github.com/erigontech/erigon/cmd/utils"
+	erigon_node "github.com/erigontech/erigon/node"
+	erigon_app "github.com/erigontech/erigon/turbo/app"
+	"github.com/erigontech/erigon/turbo/debug"
 )
 
 var logger = log.NewModuleLogger(log.CMDUtilsNodeCMD)
@@ -94,7 +103,69 @@ It expects the genesis file as argument.`,
 		Description: `
 The dumpgenesis command dumps the genesis block configuration in JSON format to stdout.`,
 	}
+
+	IterTrieCommand = &cli.Command{
+		Action:    iterTrie,
+		Name:      "itertrie",
+		Usage:     "Iterate over the trie and count the number of nodes by their types",
+		ArgsUsage: "",
+		Flags: []cli.Flag{
+			// For compatibility with erigon
+			&cli.StringFlag{
+				Name:  erigon_cmd_utils.DbPageSizeFlag.Name,
+				Usage: "Set the size of the mdbx page size",
+				Value: "4KB",
+			},
+			&cli.StringFlag{
+				Name:  erigon_cmd_utils.DbSizeLimitFlag.Name,
+				Usage: "Set the size of the mdbx database size limit",
+				Value: "100GB",
+			},
+		},
+	}
 )
+
+func iterTrie(cliCtx *cli.Context) error {
+	logger, _, _, _ := debug.Setup(cliCtx, true /* rootLogger */)
+
+	// For compatibility with erigon
+	cliCtx.Set(erigon_cmd_utils.DbPageSizeFlag.Name, "4KB")
+	cliCtx.Set(erigon_cmd_utils.DbSizeLimitFlag.Name, (1 * datasize.TB).String())
+	stack, err := erigon_app.MakeNodeWithDefaultConfig(cliCtx, logger)
+	if err != nil {
+		return err
+	}
+	defer stack.Close()
+
+	chaindb, err := erigon_node.OpenDatabase(cliCtx.Context, stack.Config(), kv.ChainDB, "", false, logger)
+	if err != nil {
+		return fmt.Errorf("Failed to open database: %v", err)
+	}
+	defer chaindb.Close()
+
+	all := chaindb.AllTables()
+
+	// Just dump all the tables for now
+	for table, _ := range all {
+		fmt.Printf("table %s\n", table)
+		chaindb.View(cliCtx.Context, func(tx kv.Tx) error {
+			stream, err := tx.Range(table, nil, nil, order.Asc, -1)
+			if err != nil {
+				return fmt.Errorf("Failed to get acc: %v", err)
+			}
+			for stream.HasNext() {
+				k, v, err := stream.Next()
+				if err != nil {
+					return fmt.Errorf("Failed to get acc: %v", err)
+				}
+				fmt.Printf("key=0x%-80x, val=0x%-80x\n", k, v)
+			}
+			return nil
+		})
+	}
+
+	return nil
+}
 
 // initGenesis will initialise the given JSON format genesis file and writes it as
 // the zero'd block (i.e. genesis) or will fail hard if it can't succeed.
