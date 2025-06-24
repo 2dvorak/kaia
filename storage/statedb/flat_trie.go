@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"strconv"
 	"sync"
 
 	"github.com/kaiachain/kaia/common"
@@ -31,6 +32,10 @@ import (
 )
 
 var terminatorHexByte = byte(16) // max nibble value +1. Defines end of nibble line in the trie
+
+var (
+	stateRootToBlockNumPrefix = []byte("root")
+)
 
 type kaiaPatriciaContext struct {
 	sdc             *erigon_state.SharedDomainsCommitmentContext
@@ -80,19 +85,50 @@ type FlatTrie struct {
 	root     common.Hash
 	hphState []byte
 
-	addr common.Address
+	addr      common.Address
+	isGenesis bool
 
 	mu              sync.RWMutex
 	pendingAccounts map[string][]byte
 	pendingBranches map[string][]byte
 }
 
-func NewFlatTrieWithDBManager(db database.DBManager, opts *TrieOpts) (*FlatTrie, error) {
+func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, opts *TrieOpts) (*FlatTrie, error) {
+	if root != (common.Hash{}) {
+		var blockNum uint64
+		db.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
+			val, _, err := sd.GetLatest(erigon_kv.CommitmentDomain, append(stateRootToBlockNumPrefix, root.Bytes()...))
+			if err == nil {
+				blockNum, err = strconv.ParseUint(string(val), 10, 64)
+				if err != nil {
+					panic("Failed to parse block number from stateRootToBlockNumPrefix: " + err.Error())
+				}
+			}
+			return false
+		})
+		if blockNum != 0 {
+			if opts != nil {
+				if opts.TrieBlockNumber != 0 && opts.TrieBlockNumber != blockNum {
+					panic("Trie block number mismatch: " + strconv.FormatUint(opts.TrieBlockNumber, 10) + " != " + strconv.FormatUint(blockNum, 10))
+				}
+			}
+			return &FlatTrie{
+				num:             blockNum,
+				dbm:             db,
+				root:            root,
+				isGenesis:       false,
+				pendingAccounts: make(map[string][]byte),
+				pendingBranches: make(map[string][]byte),
+			}, nil
+		}
+	}
+
 	if opts != nil {
 		return &FlatTrie{
 			num:             opts.TrieBlockNumber,
 			dbm:             db,
 			root:            common.BytesToHash(commitment.EmptyRootHash),
+			isGenesis:       opts.IsGenesis,
 			pendingAccounts: make(map[string][]byte),
 			pendingBranches: make(map[string][]byte),
 		}, nil
@@ -140,7 +176,9 @@ func (trie *FlatTrie) getAccount(key []byte) ([]byte, error) {
 	trie.dbm.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
 		//sd.SetTxNum(trie.num)
 		//sd.SetBlockNum(trie.num)
-		val, _, err := sd.GetLatest(erigon_kv.AccountsDomain, key)
+		//val, _, err := sd.GetLatest(erigon_kv.AccountsDomain, key)
+		aggTx := sd.AggTx().(*erigon_state.AggregatorRoTx)
+		val, _, err := aggTx.GetAsOf(sd.Tx(), erigon_kv.AccountsDomain, key, trie.num+1)
 		if err == nil {
 			result = val
 		}
@@ -193,8 +231,11 @@ func (trie *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) { // TODO-Kai
 	defer trie.mu.Unlock()
 
 	trie.dbm.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
-		// Try incrementing num before commit, because the first commit would be for block 1, not 0 (genesis)
-		trie.num++
+		// Increment block number before commit, because we're commiting state for next block.
+		// For genesis block, we have to commit to block 0.
+		if !trie.isGenesis {
+			trie.num++
+		}
 		sd.SetTxNum(trie.num)
 		sd.SetBlockNum(trie.num)
 		for key, val := range trie.pendingAccounts {
@@ -212,6 +253,11 @@ func (trie *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) { // TODO-Kai
 		}
 		if !bytes.Equal(root, trie.root.Bytes()) {
 			panic("Commit: root mismatch: " + hex.EncodeToString(root) + " != " + hex.EncodeToString(trie.root.Bytes()))
+		}
+		// Store mapping for stateRoot -> blockNum
+		err = sd.DomainPut(erigon_kv.CommitmentDomain, stateRootToBlockNumPrefix, trie.root.Bytes(), []byte(strconv.FormatUint(trie.num, 10)), nil, 0)
+		if err != nil {
+			panic("Failed to store stateRoot to blockNum mapping for root: " + hex.EncodeToString(trie.root.Bytes()) + ", num: " + strconv.FormatUint(trie.num, 10) + ", err: " + err.Error())
 		}
 		return true
 	})

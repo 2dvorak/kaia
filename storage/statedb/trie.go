@@ -40,7 +40,9 @@ type TrieOpts struct {
 	// This option is only viable when the pruning is enabled on database.
 	PruningBlockNumber uint64
 
+	// Options for FlatTrie
 	TrieBlockNumber uint64
+	IsGenesis       bool
 }
 
 // LeafCallback is a callback type invoked when a trie operation reaches a leaf
