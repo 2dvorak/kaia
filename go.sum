@@ -701,10 +701,10 @@ github.com/julienschmidt/httprouter v1.3.0 h1:U0609e9tgbseu3rBINet9P48AI/D3oJs4d
 github.com/julienschmidt/httprouter v1.3.0/go.mod h1:JR6WtHb+2LUe8TCKY3cZOxFyyO8IZAc4RVcycCCAKdM=
 github.com/jung-kurt/gofpdf v1.0.3-0.20190309125859-24315acbbda5/go.mod h1:7Id9E/uU8ce6rXgefFLlgrJj/GYY22cpxn+r32jIOes=
 github.com/jwilder/encoding v0.0.0-20170811194829-b4e1701a28ef/go.mod h1:Ct9fl0F6iIOGgxJ5npU/IUOhOhqlVrGjyIZc8/MagT0=
-github.com/kaiachain/kaia-erigon v0.0.0-20250618022146-37fa02fd5d60 h1:1Y3pNVnXG7s2SLYproMYhdfPdadNYLF7rNciriXSIng=
-github.com/kaiachain/kaia-erigon v0.0.0-20250618022146-37fa02fd5d60/go.mod h1:agq1tiZMyzvKkaH+2606qalQgDsrqFpNWk00VN+PC40=
-github.com/kaiachain/kaia-erigon/erigon-lib v0.0.0-20250618022146-37fa02fd5d60 h1:TuT65AHJUihNkPyCxiOmeK8P1J374GUhECpyvGEpTPI=
-github.com/kaiachain/kaia-erigon/erigon-lib v0.0.0-20250618022146-37fa02fd5d60/go.mod h1:sPd04eWlrjeTMMoEjdQaqHc4XJWGKk1sltVeqgbd0FA=
+github.com/kaiachain/kaia-erigon v0.0.0-20250624133351-7b1fd1002b78 h1:Vw88NoL+zAuBNRYXbgfQ3yT+nWUb2JIIk2zIGtKTXQY=
+github.com/kaiachain/kaia-erigon v0.0.0-20250624133351-7b1fd1002b78/go.mod h1:agq1tiZMyzvKkaH+2606qalQgDsrqFpNWk00VN+PC40=
+github.com/kaiachain/kaia-erigon/erigon-lib v0.0.0-20250624133351-7b1fd1002b78 h1:Q1Qs2ehDAADyvw//pQjZhghpZY9fnu3ptkac0MgAQAA=
+github.com/kaiachain/kaia-erigon/erigon-lib v0.0.0-20250624133351-7b1fd1002b78/go.mod h1:sPd04eWlrjeTMMoEjdQaqHc4XJWGKk1sltVeqgbd0FA=
 github.com/kisielk/errcheck v1.2.0/go.mod h1:/BMXB+zMLi60iA8Vv6Ksmxu/1UDYcXs4uQLJ+jE2L00=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
