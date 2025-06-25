@@ -40,6 +40,7 @@ var (
 type kaiaPatriciaContext struct {
 	sdc             *erigon_state.SharedDomainsCommitmentContext
 	pendingAccounts map[string][]byte
+	pendingStorage  map[string][]byte
 	pendingBranches map[string][]byte
 }
 
@@ -85,42 +86,47 @@ type FlatTrie struct {
 	root     common.Hash
 	hphState []byte
 
-	addr      common.Address
+	addr      *common.Address
 	isGenesis bool
 
 	mu              sync.RWMutex
 	pendingAccounts map[string][]byte
+	pendingStorage  map[string][]byte
 	pendingBranches map[string][]byte
 }
 
-func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, opts *TrieOpts) (*FlatTrie, error) {
+// TODO: opts: FlatTrieCommit, FlatTrieIsGenesis + add comments
+// TODO: if root == empty or root == {00..}, that means it's a new trie, we start from empty trie (not block 0)
+// so we should not allow any get, before commit.
+func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, addr *common.Address, opts *TrieOpts) (*FlatTrie, error) {
 	if root != (common.Hash{}) {
 		var blockNum uint64
 		db.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
 			val, _, err := sd.GetLatest(erigon_kv.CommitmentDomain, append(stateRootToBlockNumPrefix, root.Bytes()...))
-			if err == nil {
-				blockNum, err = strconv.ParseUint(string(val), 10, 64)
-				if err != nil {
-					panic("Failed to parse block number from stateRootToBlockNumPrefix: " + err.Error())
-				}
+			if err != nil {
+				panic("Failed to get corresponding block number for root: " + root.Hex() + ", err: " + err.Error())
+			}
+			blockNum, err = strconv.ParseUint(string(val), 10, 64)
+			if err != nil {
+				panic("Failed to parse block number from stateRootToBlockNumPrefix: " + err.Error())
 			}
 			return false
 		})
-		if blockNum != 0 {
-			if opts != nil {
-				if opts.TrieBlockNumber != 0 && opts.TrieBlockNumber != blockNum {
-					panic("Trie block number mismatch: " + strconv.FormatUint(opts.TrieBlockNumber, 10) + " != " + strconv.FormatUint(blockNum, 10))
-				}
+		if opts != nil {
+			if opts.TrieBlockNumber != 0 && opts.TrieBlockNumber != blockNum {
+				panic("Trie block number mismatch: " + strconv.FormatUint(opts.TrieBlockNumber, 10) + " != " + strconv.FormatUint(blockNum, 10))
 			}
-			return &FlatTrie{
-				num:             blockNum,
-				dbm:             db,
-				root:            root,
-				isGenesis:       false,
-				pendingAccounts: make(map[string][]byte),
-				pendingBranches: make(map[string][]byte),
-			}, nil
 		}
+		return &FlatTrie{
+			num:             blockNum,
+			dbm:             db,
+			root:            root,
+			addr:            addr,
+			isGenesis:       opts != nil && opts.IsGenesis,
+			pendingAccounts: make(map[string][]byte),
+			pendingStorage:  make(map[string][]byte),
+			pendingBranches: make(map[string][]byte),
+		}, nil
 	}
 
 	if opts != nil {
@@ -128,8 +134,10 @@ func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, opts *Tri
 			num:             opts.TrieBlockNumber,
 			dbm:             db,
 			root:            common.BytesToHash(commitment.EmptyRootHash),
+			addr:            addr,
 			isGenesis:       opts.IsGenesis,
 			pendingAccounts: make(map[string][]byte),
+			pendingStorage:  make(map[string][]byte),
 			pendingBranches: make(map[string][]byte),
 		}, nil
 	}
@@ -137,7 +145,9 @@ func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, opts *Tri
 		num:             0,
 		dbm:             db,
 		root:            common.BytesToHash(commitment.EmptyRootHash),
+		addr:            addr,
 		pendingAccounts: make(map[string][]byte),
+		pendingStorage:  make(map[string][]byte),
 		pendingBranches: make(map[string][]byte),
 	}, nil
 }
@@ -147,6 +157,7 @@ func (trie *FlatTrie) getInjectedTrie(sd *erigon_state.SharedDomains) (*erigon_s
 	injectedCtx := &kaiaPatriciaContext{
 		sdc:             sdCtx,
 		pendingAccounts: trie.pendingAccounts,
+		pendingStorage:  trie.pendingStorage,
 		pendingBranches: trie.pendingBranches,
 	}
 
@@ -158,7 +169,7 @@ func (trie *FlatTrie) getInjectedTrie(sd *erigon_state.SharedDomains) (*erigon_s
 
 func (trie *FlatTrie) TryGet(key []byte) ([]byte, error) {
 	// If account trie
-	if common.EmptyAddress(trie.addr) {
+	if trie.addr == nil {
 		return trie.getAccount(key)
 	}
 	panic("FlatTrie for storage not implemented")
@@ -172,24 +183,22 @@ func (trie *FlatTrie) getAccount(key []byte) ([]byte, error) {
 		return val, nil
 	}
 
-	var result []byte
+	var val []byte
+	var err error
 	trie.dbm.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
 		//sd.SetTxNum(trie.num)
 		//sd.SetBlockNum(trie.num)
 		//val, _, err := sd.GetLatest(erigon_kv.AccountsDomain, key)
 		aggTx := sd.AggTx().(*erigon_state.AggregatorRoTx)
-		val, _, err := aggTx.GetAsOf(sd.Tx(), erigon_kv.AccountsDomain, key, trie.num+1)
-		if err == nil {
-			result = val
-		}
+		val, _, err = aggTx.GetAsOf(sd.Tx(), erigon_kv.AccountsDomain, key, trie.num+1)
 		return false
 	})
-	return result, nil
+	return val, err
 }
 
 func (trie *FlatTrie) TryUpdate(key, val []byte) error {
 	// If account trie
-	if common.EmptyAddress(trie.addr) {
+	if trie.addr == nil {
 		return trie.updateAccount(key, val)
 	}
 	panic("FlatTrie for storage not implemented")
@@ -231,6 +240,9 @@ func (trie *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) { // TODO-Kai
 	defer trie.mu.Unlock()
 
 	trie.dbm.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
+		//////////////////////
+		// TODO-Kaia: We should not increment num here, because we may commit to the same block multiple times.
+		//////////////////////
 		// Increment block number before commit, because we're commiting state for next block.
 		// For genesis block, we have to commit to block 0.
 		if !trie.isGenesis {
@@ -387,7 +399,7 @@ func (trie *FlatTrie) TryUpdateWithKeys(key, hashKey, hexKey, value []byte) erro
 }
 
 func (trie *FlatTrie) TryDelete(key []byte) error {
-	if common.EmptyAddress(trie.addr) {
+	if trie.addr == nil {
 		return trie.deleteAccount(key)
 	}
 	panic("FlatTrie for storage not implemented")
