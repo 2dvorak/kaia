@@ -24,6 +24,7 @@ package state
 
 import (
 	"bytes"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -43,6 +44,31 @@ type StateSuite struct {
 var _ = checker.Suite(&StateSuite{})
 
 var toAddr = common.BytesToAddress
+
+func TestSetLegacyAccountForTest(t *testing.T) {
+	memDB := database.NewMemoryDBManager()
+	state, _ := New(common.Hash{}, NewDatabase(memDB), nil, nil)
+
+	addr := common.HexToAddress("0x1")
+	_ = addr
+	slot := common.Hex2Bytes("0000000000000000000000000000000000000000000000000000000000000005")
+	hashedSlot := crypto.Keccak256(slot)
+	_ = hashedSlot
+	value := common.Hex2Bytes("95efef9fe22a5e1ae68baea7069dcb1ac607ed78cf12")
+	_ = value
+	state.SetLegacyAccountForTest(addr, 0, big.NewInt(0), common.HexToHash("0x0a89b4cfdf2b21fba08a6d57e4c2c598e6e630a6ef6902e44e602fbffdb066ec"), emptyCodeHash)
+
+	ir := state.IntermediateRoot(false)
+	fmt.Printf("ir: %x\n", ir)
+
+	root, err := state.Commit(false)
+	if err != nil {
+		t.Errorf("expected nil got %v", err)
+	}
+	fmt.Printf("root: %x\n", root)
+	t.Logf("root: %x\n", root)
+	t.Fail()
+}
 
 func (s *StateSuite) TestDump(c *checker.C) {
 	// generate a few entries
