@@ -17,7 +17,6 @@
 package statedb
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -116,7 +115,23 @@ type FlatTrie struct {
 // TODO: opts: FlatTrieCommit, FlatTrieIsGenesis + add comments
 // TODO: if root == empty or root == {00..}, that means it's a new trie, we start from empty trie (not block 0)
 // so we should not allow any get, before commit.
-func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, addr *common.Address, opts *TrieOpts) (*FlatTrie, error) {
+func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, addr *common.Address, opts *TrieOpts) (ft *FlatTrie, err error) {
+	// TODO: tidy up these if blocks
+	if addr != nil {
+		var val []byte
+		db.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
+			val, _, err = sd.GetLatest(erigon_kv.AccountsDomain, addr.Bytes())
+			if err != nil {
+				panic("Failed to get account for address: " + addr.Hex() + ", err: " + err.Error())
+			}
+			return false
+		})
+		if err == nil && len(val) == 0 {
+			defer func() {
+				ft.pendingAccounts[string(addr.Bytes())] = common.Hex2Bytes("00000000")
+			}()
+		}
+	}
 	if !common.EmptyHash(root) && (root != types.EmptyRootHash) {
 		var blockNum uint64
 		var err error
@@ -361,34 +376,6 @@ func (trie *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) { // TODO-Kai
 			sd.DomainPut(erigon_kv.CommitmentDomain, []byte(key), nil, val, nil, 0)
 		}
 		trie.pendingBranches = make(map[string][]byte)
-		// Try Commit and store state
-		if trie.addr == nil {
-			root, err := sd.ComputeCommitment(context.Background(), true, trie.num, "")
-			if err != nil {
-				panic("ComputeCommitment failed: " + err.Error())
-			}
-			if !bytes.Equal(root, trie.root.Bytes()) {
-				panic("Commit: root mismatch: " + hex.EncodeToString(root) + " != " + hex.EncodeToString(trie.root.Bytes()))
-			}
-		} else {
-			aggTx := sd.AggTx().(*erigon_state.AggregatorRoTx)
-			val, _, err := aggTx.GetAsOf(sd.Tx(), erigon_kv.AccountsDomain, trie.addr.Bytes(), trie.num+1)
-			if err != nil {
-				panic("GetAsOf failed: " + err.Error())
-			}
-			sd.DomainPut(erigon_kv.AccountsDomain, trie.addr.Bytes(), nil, val, nil, 0)
-			r, err := sd.ComputeCommitment(context.Background(), true, trie.num, "")
-			if err != nil {
-				panic("ComputeCommitment failed: " + err.Error())
-			}
-			fmt.Printf("Commit: commitmentroot: %x\n", r)
-			root, ok := sd.GetStorageRootHash(trie.addr.Bytes())
-			if !ok {
-				panic("Commit: storage root not found for account " + hex.EncodeToString(trie.addr.Bytes()))
-			}
-			fmt.Printf("Commit: storage root for account %x: %x\n", trie.addr.Bytes(), root)
-			trie.root = common.BytesToHash(root[:])
-		}
 
 		var err error
 		// Store mapping for stateRoot -> blockNum

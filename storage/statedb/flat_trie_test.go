@@ -611,10 +611,6 @@ func TestFlatTrieUpdateStorage(t *testing.T) {
 		t.Errorf("expected nil got %v", err)
 	}
 
-	/*if err := f.updateStorage(slot, value[1:]); err != nil {
-		t.Errorf("expected nil got %v", err)
-	}*/
-
 	if err := f.TryUpdate(slot, value); err != nil {
 		t.Errorf("expected nil got %v", err)
 	}
