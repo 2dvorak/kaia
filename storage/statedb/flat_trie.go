@@ -159,8 +159,14 @@ func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, addr *com
 			return nil, err
 		}
 		if opts != nil {
+			// For account trie, the state root must match the block number.
+			// For storage trie, the state root can be different from the block number,
+			// because storage root is not updated for every block.
 			if opts.TrieBlockNumber != 0 && opts.TrieBlockNumber != blockNum {
-				panic("Trie block number mismatch: " + strconv.FormatUint(opts.TrieBlockNumber, 10) + " != " + strconv.FormatUint(blockNum, 10))
+				if addr == nil {
+					panic("Trie block number mismatch: " + strconv.FormatUint(opts.TrieBlockNumber, 10) + " != " + strconv.FormatUint(blockNum, 10))
+				}
+				blockNum = opts.TrieBlockNumber
 			}
 		}
 		return &FlatTrie{
