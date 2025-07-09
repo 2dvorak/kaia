@@ -49,7 +49,7 @@ type Database interface {
 	OpenTrie(root common.Hash, opts *statedb.TrieOpts) (Trie, error)
 
 	// OpenStorageTrie opens the storage trie of an account.
-	OpenStorageTrie(root common.ExtHash, opts *statedb.TrieOpts) (Trie, error)
+	OpenStorageTrie(root common.ExtHash, addr *common.Address, opts *statedb.TrieOpts) (Trie, error)
 
 	// CopyTrie returns an independent copy of the given trie.
 	CopyTrie(Trie) Trie
@@ -168,6 +168,7 @@ type cachingDB struct {
 // OpenTrie opens the main account trie at a specific root hash.
 func (db *cachingDB) OpenTrie(root common.Hash, opts *statedb.TrieOpts) (Trie, error) {
 	if common.FlatTrie {
+		//fmt.Printf("OpenTrie: root: %x\n", root)
 		return statedb.NewFlatTrieWithDBManager(root, db.db.DiskDB(), nil, opts)
 	} else {
 		return statedb.NewSecureTrie(root, db.db, opts)
@@ -175,8 +176,17 @@ func (db *cachingDB) OpenTrie(root common.Hash, opts *statedb.TrieOpts) (Trie, e
 }
 
 // OpenStorageTrie opens the storage trie of an account.
-func (db *cachingDB) OpenStorageTrie(root common.ExtHash, opts *statedb.TrieOpts) (Trie, error) {
-	return statedb.NewSecureStorageTrie(root, db.db, opts)
+func (db *cachingDB) OpenStorageTrie(root common.ExtHash, addr *common.Address, opts *statedb.TrieOpts) (Trie, error) {
+	if common.FlatTrie {
+		if addr == nil {
+			// TODO-Kaia: provide another way to iterate a FlatTrie.
+			panic("Cannot open storage trie with nil address, iterating is not supported for FlatTrie")
+		}
+		//fmt.Printf("OpenStorageTrie: root: %x, addr: %x\n", root, addr)
+		return statedb.NewFlatTrieWithDBManager(root.Unextend(), db.db.DiskDB(), addr, opts)
+	} else {
+		return statedb.NewSecureStorageTrie(root, db.db, opts)
+	}
 }
 
 // CopyTrie returns an independent copy of the given trie.

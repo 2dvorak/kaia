@@ -126,7 +126,10 @@ func (it *NodeIterator) step() error {
 	obj := serializer.GetAccount()
 
 	if pa := account.GetProgramAccount(obj); pa != nil {
-		dataTrie, err := it.state.db.OpenStorageTrie(pa.GetStorageRoot(), nil)
+		// TODO-Kaia: if using FlatTrie, we need to pass the address to the OpenStorageTrie,
+		// However it's not feasible here since the it.stateIt.Path() contains the keccak256 of the address.
+		// As a result, iterating a FlatTrie is not supported - OpenStorageTrie will panic.
+		dataTrie, err := it.state.db.OpenStorageTrie(pa.GetStorageRoot(), nil, nil)
 		if err != nil {
 			return err
 		}

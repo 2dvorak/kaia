@@ -20,10 +20,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"fmt"
 	"strconv"
 	"sync"
 
+	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/rlp"
 	"github.com/kaiachain/kaia/storage/database"
 
 	"github.com/erigontech/erigon-lib/commitment"
@@ -34,7 +37,8 @@ import (
 var terminatorHexByte = byte(16) // max nibble value +1. Defines end of nibble line in the trie
 
 var (
-	stateRootToBlockNumPrefix = []byte("root")
+	accountRootToBlockNumPrefix = []byte("ar")
+	storageRootToBlockNumPrefix = []byte("sr")
 )
 
 type kaiaPatriciaContext struct {
@@ -77,6 +81,20 @@ func (ctx *kaiaPatriciaContext) Account(plainKey []byte) (*commitment.Update, er
 
 func (ctx *kaiaPatriciaContext) Storage(plainKey []byte) (*commitment.Update, error) {
 	// TODO-Kaia: pendingStorage
+	if ctx.pendingStorage != nil {
+		if data, ok := ctx.pendingStorage[string(plainKey)]; ok {
+			fmt.Printf("pendingStorage: %x, %x\n", plainKey, data)
+			u := &commitment.Update{
+				StorageLen: len(data),
+				Flags:      commitment.DeleteUpdate,
+			}
+			if len(data) > 0 {
+				u.Flags = commitment.StorageUpdate
+				copy(u.Storage[:u.StorageLen], data)
+			}
+			return u, nil
+		}
+	}
 	return ctx.sdc.Storage(plainKey)
 }
 
@@ -99,12 +117,22 @@ type FlatTrie struct {
 // TODO: if root == empty or root == {00..}, that means it's a new trie, we start from empty trie (not block 0)
 // so we should not allow any get, before commit.
 func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, addr *common.Address, opts *TrieOpts) (*FlatTrie, error) {
-	if root != (common.Hash{}) {
+	if !common.EmptyHash(root) && (root != types.EmptyRootHash) {
 		var blockNum uint64
+		var err error
 		db.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
-			val, _, err := sd.GetLatest(erigon_kv.CommitmentDomain, append(stateRootToBlockNumPrefix, root.Bytes()...))
+			var val []byte
+			if addr == nil {
+				val, _, err = sd.GetLatest(erigon_kv.CommitmentDomain, append(accountRootToBlockNumPrefix, root.Bytes()...))
+			} else {
+				val, _, err = sd.GetLatest(erigon_kv.CommitmentDomain, append(storageRootToBlockNumPrefix, append(addr.Bytes(), root.Bytes()...)...))
+			}
 			if err != nil {
 				panic("Failed to get corresponding block number for root: " + root.Hex() + ", err: " + err.Error())
+			}
+			if len(val) == 0 {
+				err = fmt.Errorf("no block number found for root: %x", root)
+				return false
 			}
 			blockNum, err = strconv.ParseUint(string(val), 10, 64)
 			if err != nil {
@@ -112,6 +140,9 @@ func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, addr *com
 			}
 			return false
 		})
+		if err != nil {
+			return nil, err
+		}
 		if opts != nil {
 			if opts.TrieBlockNumber != 0 && opts.TrieBlockNumber != blockNum {
 				panic("Trie block number mismatch: " + strconv.FormatUint(opts.TrieBlockNumber, 10) + " != " + strconv.FormatUint(blockNum, 10))
@@ -172,7 +203,11 @@ func (trie *FlatTrie) TryGet(key []byte) ([]byte, error) {
 	if trie.addr == nil {
 		return trie.getAccount(key)
 	}
-	panic("FlatTrie for storage not implemented")
+	val, err := trie.getStorage(key)
+	if err != nil {
+		return nil, err
+	}
+	return rlp.EncodeToBytes(val)
 }
 
 func (trie *FlatTrie) getAccount(key []byte) ([]byte, error) {
@@ -196,12 +231,37 @@ func (trie *FlatTrie) getAccount(key []byte) ([]byte, error) {
 	return val, err
 }
 
+func (trie *FlatTrie) getStorage(key []byte) ([]byte, error) {
+	trie.mu.RLock()
+	defer trie.mu.RUnlock()
+
+	if val, ok := trie.pendingStorage[string(append(trie.addr.Bytes(), key...))]; ok {
+		return val, nil
+	}
+
+	var val []byte
+	var err error
+	trie.dbm.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
+		aggTx := sd.AggTx().(*erigon_state.AggregatorRoTx)
+		val, _, err = aggTx.GetAsOf(sd.Tx(), erigon_kv.StorageDomain, key, trie.num+1)
+		return false
+	})
+	return val, err
+}
+
 func (trie *FlatTrie) TryUpdate(key, val []byte) error {
+	fmt.Printf("TryUpdate: key: %x, val: %x\n", key, val)
 	// If account trie
 	if trie.addr == nil {
 		return trie.updateAccount(key, val)
 	}
-	panic("FlatTrie for storage not implemented")
+	// Since our code RLP encodes the value, try removing the first byte.
+	var dec []byte
+	err := rlp.DecodeBytes(val, &dec)
+	if err != nil {
+		return err
+	}
+	return trie.updateStorage(key, dec)
 }
 
 func (trie *FlatTrie) updateAccount(key, val []byte) error {
@@ -222,6 +282,44 @@ func (trie *FlatTrie) updateAccount(key, val []byte) error {
 		root, err = sd.ComputeCommitment(context.Background(), false, trie.num, "")
 
 		trie.root = common.BytesToHash(root)
+		trie.hphState, err = hph.EncodeCurrentState(nil)
+		return false
+	})
+	return err
+}
+
+func (trie *FlatTrie) updateStorage(key, val []byte) error {
+	trie.mu.Lock()
+	defer trie.mu.Unlock()
+
+	trie.pendingStorage[string(append(trie.addr.Bytes(), key...))] = val
+
+	var err error
+	// TODO: defer hash calculation to trie.Hash() and trie.Commit().
+	trie.dbm.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
+		sdCtx, hph := trie.getInjectedTrie(sd)
+		sdCtx.TouchKey(erigon_kv.StorageDomain, string(append(trie.addr.Bytes(), key...)), val)
+
+		aggTx := sd.AggTx().(*erigon_state.AggregatorRoTx)
+		val, _, err := aggTx.GetAsOf(sd.Tx(), erigon_kv.AccountsDomain, trie.addr.Bytes(), trie.num+1)
+		if err != nil {
+			panic("GetAsOf failed: " + err.Error())
+		}
+		_ = val
+		sdCtx.TouchKey(erigon_kv.AccountsDomain, string(trie.addr.Bytes()), val)
+
+		r, err := sd.ComputeCommitment(context.Background(), false, trie.num, "")
+		if err != nil {
+			panic("ComputeCommitment failed: " + err.Error())
+		}
+		fmt.Printf("updateStorage: commitmentroot: %x\n", r)
+
+		root, ok := sd.GetStorageRootHash(trie.addr.Bytes())
+		if !ok {
+			panic("updateStorage: storage root not found for account " + hex.EncodeToString(trie.addr.Bytes()))
+		}
+
+		trie.root = common.BytesToHash(root[:])
 		trie.hphState, err = hph.EncodeCurrentState(nil)
 		return false
 	})
@@ -254,20 +352,51 @@ func (trie *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) { // TODO-Kai
 			sd.DomainPut(erigon_kv.AccountsDomain, []byte(key), nil, val, nil, 0)
 		}
 		trie.pendingAccounts = make(map[string][]byte)
+		for key, val := range trie.pendingStorage {
+			// The key is already prefixed with the address, so we don't need to add it again.
+			sd.DomainPut(erigon_kv.StorageDomain, []byte(key), nil, val, nil, 0)
+		}
+		trie.pendingStorage = make(map[string][]byte)
 		for key, val := range trie.pendingBranches {
 			sd.DomainPut(erigon_kv.CommitmentDomain, []byte(key), nil, val, nil, 0)
 		}
 		trie.pendingBranches = make(map[string][]byte)
 		// Try Commit and store state
-		root, err := sd.ComputeCommitment(context.Background(), true, trie.num, "")
-		if err != nil {
-			panic("ComputeCommitment failed: " + err.Error())
+		if trie.addr == nil {
+			root, err := sd.ComputeCommitment(context.Background(), true, trie.num, "")
+			if err != nil {
+				panic("ComputeCommitment failed: " + err.Error())
+			}
+			if !bytes.Equal(root, trie.root.Bytes()) {
+				panic("Commit: root mismatch: " + hex.EncodeToString(root) + " != " + hex.EncodeToString(trie.root.Bytes()))
+			}
+		} else {
+			aggTx := sd.AggTx().(*erigon_state.AggregatorRoTx)
+			val, _, err := aggTx.GetAsOf(sd.Tx(), erigon_kv.AccountsDomain, trie.addr.Bytes(), trie.num+1)
+			if err != nil {
+				panic("GetAsOf failed: " + err.Error())
+			}
+			sd.DomainPut(erigon_kv.AccountsDomain, trie.addr.Bytes(), nil, val, nil, 0)
+			r, err := sd.ComputeCommitment(context.Background(), true, trie.num, "")
+			if err != nil {
+				panic("ComputeCommitment failed: " + err.Error())
+			}
+			fmt.Printf("Commit: commitmentroot: %x\n", r)
+			root, ok := sd.GetStorageRootHash(trie.addr.Bytes())
+			if !ok {
+				panic("Commit: storage root not found for account " + hex.EncodeToString(trie.addr.Bytes()))
+			}
+			fmt.Printf("Commit: storage root for account %x: %x\n", trie.addr.Bytes(), root)
+			trie.root = common.BytesToHash(root[:])
 		}
-		if !bytes.Equal(root, trie.root.Bytes()) {
-			panic("Commit: root mismatch: " + hex.EncodeToString(root) + " != " + hex.EncodeToString(trie.root.Bytes()))
-		}
+
+		var err error
 		// Store mapping for stateRoot -> blockNum
-		err = sd.DomainPut(erigon_kv.CommitmentDomain, stateRootToBlockNumPrefix, trie.root.Bytes(), []byte(strconv.FormatUint(trie.num, 10)), nil, 0)
+		if trie.addr == nil {
+			err = sd.DomainPut(erigon_kv.CommitmentDomain, accountRootToBlockNumPrefix, trie.root.Bytes(), []byte(strconv.FormatUint(trie.num, 10)), nil, 0)
+		} else {
+			err = sd.DomainPut(erigon_kv.CommitmentDomain, storageRootToBlockNumPrefix, append(trie.addr.Bytes(), trie.root.Bytes()...), []byte(strconv.FormatUint(trie.num, 10)), nil, 0)
+		}
 		if err != nil {
 			panic("Failed to store stateRoot to blockNum mapping for root: " + hex.EncodeToString(trie.root.Bytes()) + ", num: " + strconv.FormatUint(trie.num, 10) + ", err: " + err.Error())
 		}
@@ -277,7 +406,11 @@ func (trie *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) { // TODO-Kai
 }
 
 func (trie *FlatTrie) CommitExt(cb LeafCallback) (common.ExtHash, error) {
-	panic("not implemented")
+	root, err := trie.Commit(cb)
+	if err != nil {
+		return common.ExtHash{}, err
+	}
+	return root.ExtendZero(), nil
 }
 
 func (trie *FlatTrie) NodeIterator(startKey []byte) NodeIterator {
@@ -391,7 +524,10 @@ func (trie *FlatTrie) GetKey(key []byte) []byte {
 }
 
 func (trie *FlatTrie) HashExt() common.ExtHash {
-	panic("not implemented")
+	trie.mu.RLock()
+	defer trie.mu.RUnlock()
+
+	return trie.root.ExtendZero()
 }
 
 func (trie *FlatTrie) TryUpdateWithKeys(key, hashKey, hexKey, value []byte) error {
@@ -402,7 +538,7 @@ func (trie *FlatTrie) TryDelete(key []byte) error {
 	if trie.addr == nil {
 		return trie.deleteAccount(key)
 	}
-	panic("FlatTrie for storage not implemented")
+	return trie.deleteStorage(key)
 }
 
 func (trie *FlatTrie) deleteAccount(key []byte) error {
@@ -417,6 +553,28 @@ func (trie *FlatTrie) deleteAccount(key []byte) error {
 	trie.dbm.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
 		sdCtx, hph := trie.getInjectedTrie(sd)
 		sdCtx.TouchKey(erigon_kv.AccountsDomain, string(key), nil)
+
+		root, err = sd.ComputeCommitment(context.Background(), false, 0, "")
+
+		trie.root = common.BytesToHash(root)
+		trie.hphState, err = hph.EncodeCurrentState(nil)
+		return false
+	})
+	return err
+}
+
+func (trie *FlatTrie) deleteStorage(key []byte) error {
+	trie.mu.Lock()
+	defer trie.mu.Unlock()
+
+	trie.pendingStorage[string(append(trie.addr.Bytes(), key...))] = nil
+
+	var root []byte
+	var err error
+	// TODO: defer hash calculation to trie.Hash() and trie.Commit().
+	trie.dbm.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
+		sdCtx, hph := trie.getInjectedTrie(sd)
+		sdCtx.TouchKey(erigon_kv.StorageDomain, string(append(trie.addr.Bytes(), key...)), nil)
 
 		root, err = sd.ComputeCommitment(context.Background(), false, 0, "")
 

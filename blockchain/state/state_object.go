@@ -169,7 +169,7 @@ func (s *stateObject) touch() {
 }
 
 func (s *stateObject) openStorageTrie(hash common.ExtHash, db Database) (Trie, error) {
-	return db.OpenStorageTrie(hash, s.db.trieOpts)
+	return db.OpenStorageTrie(hash, &s.address, s.db.trieOpts)
 }
 
 func (s *stateObject) getStorageTrie(db Database) Trie {
