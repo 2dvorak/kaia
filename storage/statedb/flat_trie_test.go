@@ -592,9 +592,9 @@ func TestSharedDomainOnlyStorageUpdates(t *testing.T) {
 }
 
 func TestFlatTrieUpdateStorage(t *testing.T) {
-	if commitment.CurrentAccountDeserialiseMode != commitment.AccountDeserialiseModeErigonV3 {
+	if commitment.CurrentAccountDeserialiseMode != commitment.AccountDeserialiseModeKaia {
 		mode := commitment.CurrentAccountDeserialiseMode
-		commitment.CurrentAccountDeserialiseMode = commitment.AccountDeserialiseModeErigonV3
+		commitment.CurrentAccountDeserialiseMode = commitment.AccountDeserialiseModeKaia
 		defer func() {
 			commitment.CurrentAccountDeserialiseMode = mode
 		}()
@@ -603,57 +603,67 @@ func TestFlatTrieUpdateStorage(t *testing.T) {
 	defer dbm.Close()
 
 	addr := common.HexToAddress("0x1")
-	slot := common.Hex2Bytes("0000000000000000000000000000000000000000000000000000000000000005")
-	value := common.Hex2Bytes("95efef9fe22a5e1ae68baea7069dcb1ac607ed78cf12")
+
+	firstStep := 5
+
+	storageUpdates := []struct {
+		slot  []byte
+		value []byte
+	}{
+		{common.Hex2Bytes("0000000000000000000000000000000000000000000000000000000000000004"), common.Hex2Bytes("a04248540000000000000000000000000000000000000000000000000000000006")},
+		{common.Hex2Bytes("0000000000000000000000000000000000000000000000000000000000000005"), common.Hex2Bytes("95efef9fe22a5e1ae68baea7069dcb1ac607ed78cf12")},
+		{common.Hex2Bytes("0000000000000000000000000000000000000000000000000000000000000002"), common.Hex2Bytes("8c033b2e3c9fd0803ce8000000")},
+		{common.Hex2Bytes("3eaa2d76dda4c78c477b7231cb487c2b8fa646a998125bc96085f54b529e14a6"), common.Hex2Bytes("8c033b2e3c9fd0803ce8000000")},
+		{common.Hex2Bytes("0000000000000000000000000000000000000000000000000000000000000003"), common.Hex2Bytes("a0424820546f6b656e000000000000000000000000000000000000000000000010")},
+		{common.Hex2Bytes("0000000000000000000000000000000000000000000000000000000000000006"), common.Hex2Bytes("9462c7998273966cd2f219bb44f60b2870fa538622")},
+	}
 
 	f, err := NewFlatTrieWithDBManager(common.Hash{}, dbm, &addr, nil)
 	if err != nil {
 		t.Errorf("expected nil got %v", err)
 	}
 
-	if err := f.TryUpdate(slot, value); err != nil {
-		t.Errorf("expected nil got %v", err)
-	}
-
-	val, err := f.TryGet(slot)
-	if err != nil {
-		t.Errorf("expected nil got %v", err)
-	}
-	fmt.Printf("val: %x\n", val)
-
-	root := f.Hash()
-	if err != nil {
-		t.Errorf("expected nil got %v", err)
-	}
-	fmt.Printf("root: %x\n", root)
-
-	root2, err := f.Commit(nil)
-	if err != nil {
-		t.Errorf("expected nil got %v", err)
-	}
-	fmt.Printf("root2: %x\n", root2)
-
 	st, err := NewSecureTrie(common.Hash{}, NewDatabase(dbm), nil)
 	if err != nil {
 		t.Errorf("expected nil got %v", err)
 	}
-	if err := st.TryUpdate(slot, value); err != nil {
-		t.Errorf("expected nil got %v", err)
-	}
-	root3 := st.Hash()
-	fmt.Printf("root3: %x\n", root3)
 
-	f2, err := NewFlatTrieWithDBManager(common.Hash{}, dbm, nil, nil)
+	for i, update := range storageUpdates {
+		if i == firstStep {
+			break
+		}
+		if err := f.TryUpdate(update.slot, update.value); err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		if err := st.TryUpdate(update.slot, update.value); err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		root1 := f.Hash()
+		fmt.Printf("root1: %x\n", root1)
+		root2 := st.Hash()
+		fmt.Printf("root2: %x\n", root2)
+		require.Equal(t, root1, root2, i)
+	}
+
+	f2, err := NewFlatTrieWithDBManager(f.Hash(), dbm, &addr, &TrieOpts{
+		TrieBlockNumber: 1,
+	})
 	if err != nil {
 		t.Errorf("expected nil got %v", err)
 	}
-	if err := f2.TryUpdate(addr.Bytes(), common.Hex2Bytes("00000000")); err != nil {
-		t.Errorf("expected nil got %v", err)
-	}
-
-	_, err = f.Commit(nil)
-	if err != nil {
-		t.Errorf("expected nil got %v", err)
+	for i, update := range storageUpdates {
+		if i < firstStep {
+			continue
+		}
+		if err := f2.TryUpdate(update.slot, update.value); err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		if err := st.TryUpdate(update.slot, update.value); err != nil {
+			t.Errorf("expected nil got %v", err)
+		}
+		root3 := f2.Hash()
+		root4 := st.Hash()
+		require.Equal(t, root3, root4, i)
 	}
 
 	t.Fail()
