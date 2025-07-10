@@ -69,7 +69,7 @@ func (ctx *kaiaPatriciaContext) Account(plainKey []byte) (*commitment.Update, er
 			rawBytes := make([]byte, len(data))
 			copy(rawBytes, data)
 			return &commitment.Update{
-				CodeHash: commitment.EmptyCodeHashArray,
+				//CodeHash: commitment.EmptyCodeHashArray,
 				Flags:    commitment.RawBytesUpdate,
 				RawBytes: rawBytes,
 			}, nil
@@ -82,7 +82,6 @@ func (ctx *kaiaPatriciaContext) Storage(plainKey []byte) (*commitment.Update, er
 	// TODO-Kaia: pendingStorage
 	if ctx.pendingStorage != nil {
 		if data, ok := ctx.pendingStorage[string(plainKey)]; ok {
-			fmt.Printf("pendingStorage: %x, %x\n", plainKey, data)
 			u := &commitment.Update{
 				StorageLen: len(data),
 				Flags:      commitment.DeleteUpdate,
@@ -228,6 +227,10 @@ func (trie *FlatTrie) TryGet(key []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// If the value is empty, return nil.
+	if len(val) == 0 {
+		return nil, nil
+	}
 	return rlp.EncodeToBytes(val)
 }
 
@@ -264,14 +267,14 @@ func (trie *FlatTrie) getStorage(key []byte) ([]byte, error) {
 	var err error
 	trie.dbm.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
 		aggTx := sd.AggTx().(*erigon_state.AggregatorRoTx)
-		val, _, err = aggTx.GetAsOf(sd.Tx(), erigon_kv.StorageDomain, key, trie.num+1)
+		val, _, err = aggTx.GetAsOf(sd.Tx(), erigon_kv.StorageDomain, append(trie.addr.Bytes(), key...), trie.num+1)
 		return false
 	})
 	return val, err
 }
 
 func (trie *FlatTrie) TryUpdate(key, val []byte) error {
-	fmt.Printf("TryUpdate: key: %x, val: %x\n", key, val)
+	fmt.Printf("TryUpdate: key: %x, val: %x, addr: %x\n", key, val, trie.addr)
 	// If account trie
 	if trie.addr == nil {
 		return trie.updateAccount(key, val)
@@ -321,19 +324,16 @@ func (trie *FlatTrie) updateStorage(key, val []byte) error {
 		sdCtx, hph := trie.getInjectedTrie(sd)
 		sdCtx.TouchKey(erigon_kv.StorageDomain, string(append(trie.addr.Bytes(), key...)), val)
 
-		aggTx := sd.AggTx().(*erigon_state.AggregatorRoTx)
-		val, _, err := aggTx.GetAsOf(sd.Tx(), erigon_kv.AccountsDomain, trie.addr.Bytes(), trie.num+1)
-		if err != nil {
-			panic("GetAsOf failed: " + err.Error())
+		// This means the account is not yet committed, so we need to touch it to trigger storage root calculation.
+		if account, ok := trie.pendingAccounts[string(trie.addr.Bytes())]; ok {
+			sdCtx.TouchKey(erigon_kv.AccountsDomain, string(trie.addr.Bytes()), account)
 		}
-		_ = val
-		sdCtx.TouchKey(erigon_kv.AccountsDomain, string(trie.addr.Bytes()), val)
 
-		r, err := sd.ComputeCommitment(context.Background(), false, trie.num, "")
+		// Call ComputeCommitment to update the storage root.
+		_, err = sd.ComputeCommitment(context.Background(), false, trie.num, "")
 		if err != nil {
 			panic("ComputeCommitment failed: " + err.Error())
 		}
-		fmt.Printf("updateStorage: commitmentroot: %x\n", r)
 
 		root, ok := sd.GetStorageRootHash(trie.addr.Bytes())
 		if !ok {
@@ -369,8 +369,11 @@ func (trie *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) { // TODO-Kai
 		}
 		sd.SetTxNum(trie.num)
 		sd.SetBlockNum(trie.num)
-		for key, val := range trie.pendingAccounts {
-			sd.DomainPut(erigon_kv.AccountsDomain, []byte(key), nil, val, nil, 0)
+		// We may have set empty account to calculate storage root for non-existent account, so we should not commit it.
+		if trie.addr == nil {
+			for key, val := range trie.pendingAccounts {
+				sd.DomainPut(erigon_kv.AccountsDomain, []byte(key), nil, val, nil, 0)
+			}
 		}
 		trie.pendingAccounts = make(map[string][]byte)
 		for key, val := range trie.pendingStorage {
