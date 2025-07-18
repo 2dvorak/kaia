@@ -472,9 +472,6 @@ func serializeBranch(branches map[string]branch) ([]byte, error) {
 		return nil, fmt.Errorf("encode storageRootHashes count: %w", err)
 	}
 	for pref, branch := range branches {
-		if trace {
-			fmt.Printf("serializeBranch: pref: %x, data: %x\n", pref, branch.data)
-		}
 		if err := binary.Write(buf, binary.BigEndian, uint16(len(pref))); err != nil {
 			return nil, fmt.Errorf("encode account key length: %w", err)
 		}
