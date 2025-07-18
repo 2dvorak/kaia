@@ -36,11 +36,13 @@ import (
 	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/cmd/utils"
+	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/hexutil"
 	headergov_impl "github.com/kaiachain/kaia/kaiax/gov/headergov/impl"
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/storage/database"
+	"github.com/kaiachain/kaia/storage/statedb"
 	"github.com/urfave/cli/v2"
 
 	"github.com/erigontech/erigon-lib/common/datadir"
@@ -111,10 +113,10 @@ It expects the genesis file as argument.`,
 The dumpgenesis command dumps the genesis block configuration in JSON format to stdout.`,
 	}
 
-	IterTrieCommand = &cli.Command{
-		Action:    iterTrie,
-		Name:      "itertrie",
-		Usage:     "Iterate over the trie and count the number of nodes by their types",
+	IterTableCommand = &cli.Command{
+		Action:    iterTable,
+		Name:      "iterTable",
+		Usage:     "Iterate over the table and count the number of nodes by their types",
 		ArgsUsage: "",
 		Flags: []cli.Flag{
 			// For compatibility with erigon
@@ -129,6 +131,13 @@ The dumpgenesis command dumps the genesis block configuration in JSON format to 
 				Value: "100GB",
 			},
 		},
+	}
+
+	IterTrieCommand = &cli.Command{
+		Action:    iterTrie,
+		Name:      "itertrie",
+		Usage:     "Iterate over the trie and print the key-value pairs",
+		ArgsUsage: "",
 	}
 
 	DbGetCommand = &cli.Command{
@@ -160,7 +169,45 @@ The kvget command reads a key from the flattrie.`,
 	}
 )
 
-func iterTrie(cliCtx *cli.Context) error {
+func iterTrie(ctx *cli.Context) error {
+	root := ctx.Args().First()
+
+	// Open an initialise both full and light databases
+	stack := MakeFullNode(ctx)
+	parallelDBWrite := !ctx.Bool(utils.NoParallelDBWriteFlag.Name)
+	singleDB := ctx.Bool(utils.SingleDBFlag.Name)
+	numStateTrieShards := ctx.Uint(utils.NumStateTrieShardsFlag.Name)
+
+	dbtype := database.DBType(ctx.String(utils.DbTypeFlag.Name)).ToValid()
+	if len(dbtype) == 0 {
+		logger.Crit("invalid dbtype", "dbtype", ctx.String(utils.DbTypeFlag.Name))
+	}
+	dbc := &database.DBConfig{
+		Dir: "chaindata", DBType: dbtype, ParallelDBWrite: parallelDBWrite,
+		SingleDB: singleDB, NumStateTrieShards: numStateTrieShards,
+		LevelDBCacheSize: 0, PebbleDBCacheSize: 0, OpenFilesLimit: 0,
+	}
+	chainDB := stack.OpenDatabase(dbc)
+	defer chainDB.Close()
+
+	//db := chainDB.GetDatabase(database.StateTrieDB)
+
+	// open trie
+	st, err := statedb.NewSecureTrie(common.HexToHash(root), statedb.NewDatabase(chainDB), &statedb.TrieOpts{})
+	if err != nil {
+		return fmt.Errorf("Failed to open trie: %v", err)
+	}
+
+	it := st.NodeIterator(nil)
+	for it.Next(true) {
+		if it.Leaf() {
+			fmt.Printf("hashed key: %x, rlp encoded value: %x\n", it.LeafKey(), it.LeafBlob())
+		}
+	}
+	return nil
+}
+
+func iterTable(cliCtx *cli.Context) error {
 	logger, _, _, _ := debug.Setup(cliCtx, true /* rootLogger */)
 
 	// For compatibility with erigon
