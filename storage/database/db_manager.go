@@ -581,8 +581,8 @@ func openKaiaMdbx(dirs datadir.Dirs) (erigon_kv.RwDB, *erigon_state.Aggregator) 
 	db := mdbx.New(erigon_kv.ChainDB, logger).
 		//InMem(dirs.Chaindata). // path to persisted data
 		Path(dirs.Chaindata).
-		GrowthStep(32 * 1024 * 1024).
-		MapSize(2 * 1024 * 1024 * 1024).
+		GrowthStep(256 * 1024 * 1024).
+		MapSize(5 * 1024 * 1024 * 1024 * 1024).
 		MustOpen()
 
 	// Set aggStep to 1
@@ -999,7 +999,9 @@ func (dbm *databaseManager) returnMdbxTx(commit bool) {
 	if commit {
 		dbm.sd.Flush(context.Background(), dbm.tx)
 		dbm.sd.Close()
-		dbm.tx.Commit()
+		if err := dbm.tx.Commit(); err != nil {
+			panic("Failed to commit transaction: " + err.Error())
+		}
 		dbm.ac.Close()
 	} else {
 		dbm.sd.Close()
