@@ -17,7 +17,9 @@
 package statedb
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"strconv"
@@ -38,19 +40,27 @@ var terminatorHexByte = byte(16) // max nibble value +1. Defines end of nibble l
 var (
 	accountRootToBlockNumPrefix = []byte("ar")
 	storageRootToBlockNumPrefix = []byte("sr")
+	storageBranchesPrefix       = []byte("sb")
+	keyCommitmentState          = []byte("state")
 )
+
+type branch struct {
+	data     []byte
+	prevData []byte
+	prevStep uint64
+}
 
 type kaiaPatriciaContext struct {
 	sdc             *erigon_state.SharedDomainsCommitmentContext
 	pendingAccounts map[string][]byte
 	pendingStorage  map[string][]byte
-	pendingBranches map[string][]byte
+	pendingBranches map[string]branch
 }
 
 func (ctx *kaiaPatriciaContext) Branch(prefix []byte) ([]byte, uint64, error) {
 	if ctx.pendingBranches != nil {
-		if data, ok := ctx.pendingBranches[string(prefix)]; ok {
-			return data, 0, nil
+		if branch, ok := ctx.pendingBranches[string(prefix)]; ok {
+			return branch.data, branch.prevStep, nil
 		}
 	}
 	return ctx.sdc.Branch(prefix)
@@ -58,9 +68,13 @@ func (ctx *kaiaPatriciaContext) Branch(prefix []byte) ([]byte, uint64, error) {
 
 func (ctx *kaiaPatriciaContext) PutBranch(prefix []byte, data []byte, prevData []byte, prevStep uint64) error {
 	if ctx.pendingBranches != nil {
-		ctx.pendingBranches[string(prefix)] = data
+		ctx.pendingBranches[string(prefix)] = branch{
+			data:     data,
+			prevData: prevData,
+			prevStep: prevStep,
+		}
 	}
-	return nil
+	return ctx.sdc.PutBranch(prefix, data, prevData, prevStep)
 }
 
 func (ctx *kaiaPatriciaContext) Account(plainKey []byte) (*commitment.Update, error) {
@@ -108,7 +122,7 @@ type FlatTrie struct {
 	mu              sync.RWMutex
 	pendingAccounts map[string][]byte
 	pendingStorage  map[string][]byte
-	pendingBranches map[string][]byte
+	pendingBranches map[string]branch
 }
 
 // TODO: opts: FlatTrieCommit, FlatTrieIsGenesis + add comments
@@ -118,16 +132,29 @@ func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, addr *com
 	// TODO: tidy up these if blocks
 	if addr != nil {
 		var val []byte
+		var branches []byte
 		db.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
 			val, _, err = sd.GetLatest(erigon_kv.AccountsDomain, addr.Bytes())
 			if err != nil {
 				panic("Failed to get account for address: " + addr.Hex() + ", err: " + err.Error())
+			}
+			branches, _, err = sd.GetLatest(erigon_kv.CommitmentDomain, append(storageBranchesPrefix, append(addr.Bytes(), root.Bytes()...)...))
+			if err != nil {
+				panic("Failed to get branches for address: " + addr.Hex() + ", err: " + err.Error())
 			}
 			return false
 		})
 		if err == nil && len(val) == 0 {
 			defer func() {
 				ft.pendingAccounts[string(addr.Bytes())] = common.Hex2Bytes("00000000")
+			}()
+		}
+		if err == nil && len(branches) != 0 {
+			defer func() {
+				// deserialize branches
+				if ft.pendingBranches, err = deserializeBranch(branches); err != nil {
+					panic("Failed to deserialize branches: " + err.Error())
+				}
 			}()
 		}
 	}
@@ -176,7 +203,7 @@ func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, addr *com
 			isGenesis:       opts != nil && opts.IsGenesis,
 			pendingAccounts: make(map[string][]byte),
 			pendingStorage:  make(map[string][]byte),
-			pendingBranches: make(map[string][]byte),
+			pendingBranches: make(map[string]branch),
 		}, nil
 	}
 
@@ -189,7 +216,7 @@ func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, addr *com
 			isGenesis:       opts.IsGenesis,
 			pendingAccounts: make(map[string][]byte),
 			pendingStorage:  make(map[string][]byte),
-			pendingBranches: make(map[string][]byte),
+			pendingBranches: make(map[string]branch),
 		}, nil
 	}
 	return &FlatTrie{
@@ -199,7 +226,7 @@ func NewFlatTrieWithDBManager(root common.Hash, db database.DBManager, addr *com
 		addr:            addr,
 		pendingAccounts: make(map[string][]byte),
 		pendingStorage:  make(map[string][]byte),
-		pendingBranches: make(map[string][]byte),
+		pendingBranches: make(map[string]branch),
 	}, nil
 }
 
@@ -372,19 +399,56 @@ func (trie *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) { // TODO-Kai
 		// We may have set empty account to calculate storage root for non-existent account, so we should not commit it.
 		if trie.addr == nil {
 			for key, val := range trie.pendingAccounts {
-				sd.DomainPut(erigon_kv.AccountsDomain, []byte(key), nil, val, nil, 0)
+				if len(val) == 0 {
+					if err := sd.DomainDel(erigon_kv.AccountsDomain, []byte(key), nil, nil, 0); err != nil {
+						panic("Failed to delete account: " + err.Error())
+					}
+				} else {
+					if err := sd.DomainPut(erigon_kv.AccountsDomain, []byte(key), nil, val, nil, 0); err != nil {
+						panic("Failed to put account: " + err.Error())
+					}
+				}
 			}
 		}
 		trie.pendingAccounts = make(map[string][]byte)
 		for key, val := range trie.pendingStorage {
 			// The key is already prefixed with the address, so we don't need to add it again.
-			sd.DomainPut(erigon_kv.StorageDomain, []byte(key), nil, val, nil, 0)
+			if len(val) == 0 {
+				if err := sd.DomainDel(erigon_kv.StorageDomain, []byte(key), nil, nil, 0); err != nil {
+					panic("Failed to delete storage: " + err.Error())
+				}
+			} else {
+				if err := sd.DomainPut(erigon_kv.StorageDomain, []byte(key), nil, val, nil, 0); err != nil {
+					panic("Failed to put storage: " + err.Error())
+				}
+			}
 		}
 		trie.pendingStorage = make(map[string][]byte)
 		for key, val := range trie.pendingBranches {
-			sd.DomainPut(erigon_kv.CommitmentDomain, []byte(key), nil, val, nil, 0)
+			if len(val.data) == 0 {
+				if err := sd.DomainDel(erigon_kv.CommitmentDomain, []byte(key), nil, val.prevData, val.prevStep); err != nil {
+					panic("Failed to delete branch: " + err.Error())
+				}
+			} else {
+				if err := sd.DomainPut(erigon_kv.CommitmentDomain, []byte(key), nil, val.data, val.prevData, val.prevStep); err != nil {
+					panic("Failed to put branch: " + err.Error())
+				}
+			}
+			// Try to put branch here too, so that it would be committed to the db.
+			sd.GetCommitmentContext().PutBranch([]byte(key), val.data, val.prevData, val.prevStep)
 		}
-		trie.pendingBranches = make(map[string][]byte)
+		// TODO: this bypass should be removed
+		// Let's try store/load branches for storage trie..
+		/*if trie.addr != nil {
+			branches, err := serializeBranch(trie.pendingBranches)
+			if err != nil {
+				panic("Failed to serialize branches: " + err.Error())
+			}
+			if err := sd.DomainPut(erigon_kv.CommitmentDomain, append(storageBranchesPrefix, append(trie.addr.Bytes(), trie.root.Bytes()...)...), nil, branches, nil, 0); err != nil {
+				panic("Failed to store serialized branches: " + err.Error())
+			}
+		}*/
+		trie.pendingBranches = make(map[string]branch)
 
 		var err error
 		// Store mapping for stateRoot -> blockNum
@@ -399,6 +463,90 @@ func (trie *FlatTrie) Commit(cb LeafCallback) (common.Hash, error) { // TODO-Kai
 		return true
 	})
 	return trie.root, nil
+}
+
+func serializeBranch(branches map[string]branch) ([]byte, error) {
+	buf := bytes.NewBuffer(nil)
+	// first write the length of the map
+	if err := binary.Write(buf, binary.BigEndian, uint32(len(branches))); err != nil {
+		return nil, fmt.Errorf("encode storageRootHashes count: %w", err)
+	}
+	for pref, branch := range branches {
+		if trace {
+			fmt.Printf("serializeBranch: pref: %x, data: %x\n", pref, branch.data)
+		}
+		if err := binary.Write(buf, binary.BigEndian, uint16(len(pref))); err != nil {
+			return nil, fmt.Errorf("encode account key length: %w", err)
+		}
+		if n, err := buf.Write([]byte(pref)); err != nil || n != len(pref) {
+			return nil, fmt.Errorf("encode account key: %w", err)
+		}
+		if err := binary.Write(buf, binary.BigEndian, uint16(len(branch.data))); err != nil {
+			return nil, fmt.Errorf("encode data length: %w", err)
+		}
+		if n, err := buf.Write(branch.data[:]); err != nil || n != len(branch.data) {
+			return nil, fmt.Errorf("encode storage root hash: %w", err)
+		}
+		if err := binary.Write(buf, binary.BigEndian, uint16(len(branch.prevData))); err != nil {
+			return nil, fmt.Errorf("encode prevData length: %w", err)
+		}
+		if n, err := buf.Write(branch.prevData[:]); err != nil || n != len(branch.prevData) {
+			return nil, fmt.Errorf("encode prevData: %w", err)
+		}
+		if err := binary.Write(buf, binary.BigEndian, branch.prevStep); err != nil {
+			return nil, fmt.Errorf("encode prevStep: %w", err)
+		}
+	}
+	return buf.Bytes(), nil
+}
+
+func deserializeBranch(data []byte) (map[string]branch, error) {
+	buf := bytes.NewBuffer(data)
+	branches := make(map[string]branch)
+	var count uint32
+	if err := binary.Read(buf, binary.BigEndian, &count); err != nil {
+		return nil, fmt.Errorf("decode storageRootHashes count: %w", err)
+	}
+	for i := uint32(0); i < count; i++ {
+		var prefLen uint16
+		if err := binary.Read(buf, binary.BigEndian, &prefLen); err != nil {
+			return nil, fmt.Errorf("decode account key length: %w", err)
+		}
+		pref := make([]byte, prefLen)
+		if n, err := buf.Read(pref); err != nil || n != int(prefLen) {
+			return nil, fmt.Errorf("decode account key: %w", err)
+		}
+		var dataLen uint16
+		if err := binary.Read(buf, binary.BigEndian, &dataLen); err != nil {
+			return nil, fmt.Errorf("decode data length: %w", err)
+		}
+		data := make([]byte, dataLen)
+		if n, err := buf.Read(data); err != nil || n != int(dataLen) {
+			return nil, fmt.Errorf("decode data: %w", err)
+		}
+		var prevDataLen uint16
+		if err := binary.Read(buf, binary.BigEndian, &prevDataLen); err != nil {
+			return nil, fmt.Errorf("decode prevData length: %w", err)
+		}
+		prevData := make([]byte, prevDataLen)
+		if n, err := buf.Read(prevData); err != nil || n != int(prevDataLen) {
+			return nil, fmt.Errorf("decode prevData: %w", err)
+		}
+		var prevStep uint64
+		if err := binary.Read(buf, binary.BigEndian, &prevStep); err != nil {
+			return nil, fmt.Errorf("decode prevStep: %w", err)
+		}
+		// Let's not override "state" branch
+		if bytes.Equal([]byte(pref), keyCommitmentState) {
+			continue
+		}
+		branches[string(pref)] = branch{
+			data:     data,
+			prevData: prevData,
+			prevStep: prevStep,
+		}
+	}
+	return branches, nil
 }
 
 func (trie *FlatTrie) CommitExt(cb LeafCallback) (common.ExtHash, error) {
@@ -541,7 +689,7 @@ func (trie *FlatTrie) deleteAccount(key []byte) error {
 	trie.mu.Lock()
 	defer trie.mu.Unlock()
 
-	trie.pendingAccounts[string(key)] = nil
+	trie.pendingAccounts[string(key)] = []byte{}
 
 	var root []byte
 	var err error
@@ -563,18 +711,26 @@ func (trie *FlatTrie) deleteStorage(key []byte) error {
 	trie.mu.Lock()
 	defer trie.mu.Unlock()
 
-	trie.pendingStorage[string(append(trie.addr.Bytes(), key...))] = nil
+	trie.pendingStorage[string(append(trie.addr.Bytes(), key...))] = []byte{}
 
-	var root []byte
 	var err error
 	// TODO: defer hash calculation to trie.Hash() and trie.Commit().
 	trie.dbm.WithSharedDomains(func(sd *erigon_state.SharedDomains) bool {
 		sdCtx, hph := trie.getInjectedTrie(sd)
 		sdCtx.TouchKey(erigon_kv.StorageDomain, string(append(trie.addr.Bytes(), key...)), nil)
 
-		root, err = sd.ComputeCommitment(context.Background(), false, 0, "")
+		// Call ComputeCommitment to update the storage root.
+		_, err = sd.ComputeCommitment(context.Background(), false, trie.num, "")
+		if err != nil {
+			panic("ComputeCommitment failed: " + err.Error())
+		}
 
-		trie.root = common.BytesToHash(root)
+		root, ok := sd.GetStorageRootHash(trie.addr.Bytes())
+		if !ok {
+			panic("updateStorage: storage root not found for account " + hex.EncodeToString(trie.addr.Bytes()))
+		}
+
+		trie.root = common.BytesToHash(root[:])
 		trie.hphState, err = hph.EncodeCurrentState(nil)
 		return false
 	})
