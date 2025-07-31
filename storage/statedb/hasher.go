@@ -164,17 +164,15 @@ func (h *hasher) hashChildren(original node, db *Database, onRoot bool) (node, n
 
 		if onRoot {
 			var wg sync.WaitGroup
-			wg.Add(16)
 			for i := 0; i < 16; i++ {
 				if n.Children[i] != nil {
+					wg.Add(1)
 					go func(i int) {
 						childHasher := newHasher(&h.hasherOpts)
 						collapsed.Children[i], cached.Children[i] = childHasher.hash(n.Children[i], db, false)
 						returnHasherToPool(childHasher)
 						wg.Done()
 					}(i)
-				} else {
-					wg.Done()
 				}
 			}
 			wg.Wait()
