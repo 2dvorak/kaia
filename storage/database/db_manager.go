@@ -32,6 +32,7 @@ import (
 	"sync"
 
 	"github.com/dgraph-io/badger"
+	"github.com/erigontech/erigon-lib/kaiatrie"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/log"
@@ -79,6 +80,7 @@ type DBManager interface {
 	GetStateTrieMigrationDB() Database
 	GetTxLookupEntryDB() Database
 	GetSnapshotDB() Database
+	GetDomainsManager() *kaiatrie.DomainsManager
 
 	// from accessors_chain.go
 	ReadCanonicalHash(number uint64) common.Hash
@@ -430,6 +432,7 @@ type databaseManager struct {
 	config *DBConfig
 	dbs    []Database
 	cm     *cacheManager
+	dm     *kaiatrie.DomainsManager
 
 	// TODO-Kaia need to refine below.
 	// -merge status variable
@@ -448,6 +451,13 @@ func NewMemoryDBManager() DBManager {
 		cm:     newCacheManager(),
 	}
 	dbm.dbs[0] = NewMemDB()
+
+	logger.Info("Opening DomainsManager", "dir", os.TempDir())
+	dm, err := kaiatrie.NewTemporaryDomainsManager(os.TempDir())
+	if err != nil {
+		logger.Crit("Failed to create temporary domains manager", "err", err)
+	}
+	dbm.dm = dm
 
 	return &dbm
 }
@@ -550,6 +560,16 @@ func databaseDBManager(dbc *DBConfig) (*databaseManager, error) {
 		dbm.dbs[et] = db
 		db.Meter(dbMetricPrefix + dbBaseDirs[et] + "/") // Each database collects metrics independently.
 	}
+
+	// TODO: use non-temporary domains manager
+	dmDir := filepath.Join(dbc.Dir, "flattrie")
+	logger.Info("Opening DomainsManager", "dir", dmDir)
+	dm, err := kaiatrie.NewTemporaryDomainsManager(dmDir)
+	if err != nil {
+		logger.Crit("Failed to create temporary domains manager", "err", err)
+	}
+	dbm.dm = dm
+
 	return dbm, nil
 }
 
@@ -938,6 +958,10 @@ func (dbm *databaseManager) GetSnapshotDB() Database {
 	return dbm.getDatabase(SnapshotDB)
 }
 
+func (dbm *databaseManager) GetDomainsManager() *kaiatrie.DomainsManager {
+	return dbm.dm
+}
+
 func (dbm *databaseManager) TryCatchUpWithPrimary() error {
 	for _, db := range dbm.dbs {
 		if db != nil {
@@ -1025,6 +1049,11 @@ func (dbm *databaseManager) Close() {
 		if db != nil {
 			db.Close()
 		}
+	}
+
+	if dbm.dm != nil {
+		logger.Info("Closing MDBX domains manager")
+		dbm.dm.Close()
 	}
 }
 
