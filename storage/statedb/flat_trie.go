@@ -48,11 +48,16 @@ func getDm() *kaiatrie.DomainsManager {
 
 type FlatAccountTrie struct {
 	dt *kaiatrie.DeferredAccountTrie
+
+	baseNum uint64
 }
 
-func NewFlatAccountTrie(opts *TrieOpts) (*FlatAccountTrie, error) {
-	dt := kaiatrie.NewDeferredAccountTrie(getDm(), opts.BaseBlockNumber, opts.CommitGenesis, kaiatrie.ModeRawBytes)
-	return &FlatAccountTrie{dt: dt}, nil
+func NewFlatAccountTrie(dm *kaiatrie.DomainsManager, opts *TrieOpts) (*FlatAccountTrie, error) {
+	if opts == nil {
+		opts = &TrieOpts{}
+	}
+	dt := kaiatrie.NewDeferredAccountTrie(dm, opts.BaseBlockNumber, opts.CommitGenesis, kaiatrie.ModeRawBytes)
+	return &FlatAccountTrie{dt: dt, baseNum: opts.BaseBlockNumber}, nil
 }
 
 func (t *FlatAccountTrie) GetKey(key []byte) []byte {
@@ -94,6 +99,7 @@ func (t *FlatAccountTrie) Commit(onleaf LeafCallback) (common.Hash, error) {
 	if err != nil {
 		return common.Hash{}, err
 	}
+	logger.Warn("FlatAccountTrie.Commit", "num", t.baseNum, "root", common.BytesToHash(h[:]).Hex())
 	return common.BytesToHash(h[:]), nil
 }
 
@@ -117,11 +123,16 @@ func (t *FlatAccountTrie) Prove(key []byte, fromLevel uint, proofDb database.DBM
 
 type FlatStorageTrie struct {
 	dt *kaiatrie.DeferredStorageTrie
+
+	baseNum uint64
 }
 
-func NewFlatStorageTrie(addr common.Address, opts *TrieOpts) (*FlatStorageTrie, error) {
-	dt := kaiatrie.NewDeferredStorageTrie(getDm(), addr.Bytes(), opts.BaseBlockNumber, opts.CommitGenesis, kaiatrie.ModeRawBytes)
-	return &FlatStorageTrie{dt: dt}, nil
+func NewFlatStorageTrie(dm *kaiatrie.DomainsManager, addr common.Address, opts *TrieOpts) (*FlatStorageTrie, error) {
+	if opts == nil {
+		opts = &TrieOpts{}
+	}
+	dt := kaiatrie.NewDeferredStorageTrie(dm, addr.Bytes(), opts.BaseBlockNumber, opts.CommitGenesis, kaiatrie.ModeRawBytes)
+	return &FlatStorageTrie{dt: dt, baseNum: opts.BaseBlockNumber}, nil
 }
 
 func (t *FlatStorageTrie) GetKey(key []byte) []byte {
@@ -134,12 +145,9 @@ func (t *FlatStorageTrie) TryGet(key []byte) ([]byte, error) {
 }
 
 func (t *FlatStorageTrie) TryUpdate(key, value []byte) error {
-	kind, slot, _, err := rlp.Split(value)
+	_, slot, _, err := rlp.Split(value)
 	if err != nil {
-		return err
-	}
-	if kind != rlp.String {
-		return fmt.Errorf("expected string, got %d", kind)
+		return fmt.Errorf("failed to rlp decode: %w", err)
 	}
 	return t.dt.Update(key, slot)
 }
@@ -170,6 +178,7 @@ func (t *FlatStorageTrie) Commit(onleaf LeafCallback) (common.Hash, error) {
 	if err != nil {
 		return common.Hash{}, err
 	}
+	logger.Warn("FlatStorageTrie.Commit", "num", t.baseNum, "root", common.BytesToHash(h[:]).Hex())
 	return common.BytesToHash(h[:]), nil
 }
 

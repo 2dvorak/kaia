@@ -58,8 +58,12 @@ func Test_FlatTrie_Random(t *testing.T) {
 	stateRoot1, storageRoots1 := calcTrieRoots(t, func() trieInterface { return newEmptySecureTrie() }, func(common.Address) trieInterface { return newEmptySecureTrie() }, accounts, storages)
 
 	// Check the answer with FlatTrie
+	dm, err := kaiatrie.NewTemporaryDomainsManager(t.TempDir())
+	require.NoError(t, err)
+	defer dm.Close()
+
 	fnNewFlatAccountTrie := func() trieInterface {
-		flatAccountTrie, err := NewFlatAccountTrie(&TrieOpts{
+		flatAccountTrie, err := NewFlatAccountTrie(dm, &TrieOpts{
 			BaseBlockNumber: 0,
 			CommitGenesis:   true,
 		})
@@ -67,7 +71,7 @@ func Test_FlatTrie_Random(t *testing.T) {
 		return flatAccountTrie
 	}
 	fnNewFlatStorageTrie := func(addr common.Address) trieInterface {
-		flatStorageTrie, err := NewFlatStorageTrie(addr, &TrieOpts{
+		flatStorageTrie, err := NewFlatStorageTrie(dm, addr, &TrieOpts{
 			BaseBlockNumber: 0,
 			CommitGenesis:   true,
 		})

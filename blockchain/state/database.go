@@ -49,7 +49,7 @@ type Database interface {
 	OpenTrie(root common.Hash, opts *statedb.TrieOpts) (Trie, error)
 
 	// OpenStorageTrie opens the storage trie of an account.
-	OpenStorageTrie(root common.ExtHash, opts *statedb.TrieOpts) (Trie, error)
+	OpenStorageTrie(addr common.Address, root common.ExtHash, opts *statedb.TrieOpts) (Trie, error)
 
 	// CopyTrie returns an independent copy of the given trie.
 	CopyTrie(Trie) Trie
@@ -167,12 +167,14 @@ type cachingDB struct {
 
 // OpenTrie opens the main account trie at a specific root hash.
 func (db *cachingDB) OpenTrie(root common.Hash, opts *statedb.TrieOpts) (Trie, error) {
-	return statedb.NewSecureTrie(root, db.db, opts)
+	//return statedb.NewSecureTrie(root, db.db, opts)
+	return statedb.NewFlatAccountTrie(db.db.DiskDB().GetDomainsManager(), opts)
 }
 
 // OpenStorageTrie opens the storage trie of an account.
-func (db *cachingDB) OpenStorageTrie(root common.ExtHash, opts *statedb.TrieOpts) (Trie, error) {
-	return statedb.NewSecureStorageTrie(root, db.db, opts)
+func (db *cachingDB) OpenStorageTrie(addr common.Address, root common.ExtHash, opts *statedb.TrieOpts) (Trie, error) {
+	//return statedb.NewSecureStorageTrie(root, db.db, opts)
+	return statedb.NewFlatStorageTrie(db.db.DiskDB().GetDomainsManager(), addr, opts)
 }
 
 // CopyTrie returns an independent copy of the given trie.
@@ -180,6 +182,10 @@ func (db *cachingDB) CopyTrie(t Trie) Trie {
 	switch t := t.(type) {
 	case *statedb.SecureTrie:
 		return t.Copy()
+	case *statedb.FlatAccountTrie:
+		return t
+	case *statedb.FlatStorageTrie:
+		return t
 	default:
 		panic(fmt.Errorf("unknown trie type %T", t))
 	}
