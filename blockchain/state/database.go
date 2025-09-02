@@ -174,7 +174,7 @@ func (db *cachingDB) OpenTrie(root common.Hash, opts *statedb.TrieOpts) (Trie, e
 // OpenStorageTrie opens the storage trie of an account.
 func (db *cachingDB) OpenStorageTrie(addr common.Address, root common.ExtHash, opts *statedb.TrieOpts) (Trie, error) {
 	//return statedb.NewSecureStorageTrie(root, db.db, opts)
-	return statedb.NewFlatStorageTrie(db.db.DiskDB().GetDomainsManager(), addr, opts)
+	return statedb.NewFlatStorageTrie(db.db.DiskDB().GetDomainsManager(), addr, root.Unextend(), opts)
 }
 
 // CopyTrie returns an independent copy of the given trie.

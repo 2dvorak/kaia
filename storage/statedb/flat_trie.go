@@ -127,11 +127,11 @@ type FlatStorageTrie struct {
 	baseNum uint64
 }
 
-func NewFlatStorageTrie(dm *kaiatrie.DomainsManager, addr common.Address, opts *TrieOpts) (*FlatStorageTrie, error) {
+func NewFlatStorageTrie(dm *kaiatrie.DomainsManager, addr common.Address, storageRoot common.Hash, opts *TrieOpts) (*FlatStorageTrie, error) {
 	if opts == nil {
 		opts = &TrieOpts{}
 	}
-	dt := kaiatrie.NewDeferredStorageTrie(dm, addr.Bytes(), opts.BaseBlockNumber, opts.CommitGenesis, kaiatrie.ModeRawBytes)
+	dt := kaiatrie.NewDeferredStorageTrie(dm, addr.Bytes(), storageRoot.Bytes(), opts.BaseBlockNumber, opts.CommitGenesis, kaiatrie.ModeRawBytes)
 	return &FlatStorageTrie{dt: dt, baseNum: opts.BaseBlockNumber}, nil
 }
 

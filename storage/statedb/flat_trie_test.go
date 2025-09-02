@@ -71,7 +71,7 @@ func Test_FlatTrie_Random(t *testing.T) {
 		return flatAccountTrie
 	}
 	fnNewFlatStorageTrie := func(addr common.Address) trieInterface {
-		flatStorageTrie, err := NewFlatStorageTrie(dm, addr, &TrieOpts{
+		flatStorageTrie, err := NewFlatStorageTrie(dm, addr, common.Hash{}, &TrieOpts{
 			BaseBlockNumber: 0,
 			CommitGenesis:   true,
 		})
