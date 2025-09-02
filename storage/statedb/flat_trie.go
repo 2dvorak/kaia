@@ -99,7 +99,6 @@ func (t *FlatAccountTrie) Commit(onleaf LeafCallback) (common.Hash, error) {
 	if err != nil {
 		return common.Hash{}, err
 	}
-	logger.Warn("FlatAccountTrie.Commit", "num", t.baseNum, "root", common.BytesToHash(h[:]).Hex())
 	return common.BytesToHash(h[:]), nil
 }
 
@@ -178,7 +177,6 @@ func (t *FlatStorageTrie) Commit(onleaf LeafCallback) (common.Hash, error) {
 	if err != nil {
 		return common.Hash{}, err
 	}
-	logger.Warn("FlatStorageTrie.Commit", "num", t.baseNum, "root", common.BytesToHash(h[:]).Hex())
 	return common.BytesToHash(h[:]), nil
 }
 

@@ -41,6 +41,7 @@ import (
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/kaiachain/kaia/snapshot"
+	"github.com/kaiachain/kaia/storage/database"
 	"github.com/kaiachain/kaia/storage/statedb"
 )
 
@@ -130,19 +131,11 @@ func New(root common.Hash, db Database, snaps *snapshot.Tree, opts *statedb.Trie
 	if opts == nil {
 		opts = &statedb.TrieOpts{}
 	}
-
-	dm := db.TrieDB().DiskDB().GetDomainsManager()
-	num, ok, err := kaiatrie.ReadBlockNumByRoot(dm, root.Bytes())
+	blockNum, err := blockNumberFromRoot(db.TrieDB().DiskDB(), root)
 	if err != nil {
-		logger.Warn("failed to read block number from domains manager", "root", root.Hex(), "err", err)
 		return nil, err
-	} else if ok {
-		opts.BaseBlockNumber = num
-		logger.Warn("recovered block number from domains manager", "number", num, "root", root.Hex())
-	} else if !common.EmptyHash(root) {
-		logger.Warn("block number not found for root", "root", root.Hex())
-		return nil, fmt.Errorf("block number not found for root %s", root.Hex())
 	}
+	opts.BaseBlockNumber = blockNum
 
 	tr, err := db.OpenTrie(root, opts)
 	if err != nil {
@@ -175,6 +168,25 @@ func New(root common.Hash, db Database, snaps *snapshot.Tree, opts *statedb.Trie
 	return sdb, nil
 }
 
+func blockNumberFromRoot(dbm database.DBManager, root common.Hash) (uint64, error) {
+	// empty temporary trie or genesis block
+	if common.EmptyHash(root) {
+		return 0, nil
+	}
+
+	dm := dbm.GetDomainsManager()
+	num, ok, err := kaiatrie.ReadBlockNumByRoot(dm, root.Bytes())
+	if err != nil {
+		logger.Warn("cannot find block number from stateRoot", "root", root.Hex(), "err", err)
+		return 0, err
+	} else if ok {
+		return num, nil
+	} else {
+		logger.Warn("cannot find block number from stateRoot", "root", root.Hex(), "err", nil)
+		return 0, fmt.Errorf("block number not found for root %s", root.Hex())
+	}
+}
+
 // RLockGCCachedNode locks the GC lock of CachedNode.
 func (s *StateDB) LockGCCachedNode() {
 	s.db.RLockGCCachedNode()
@@ -199,16 +211,11 @@ func (s *StateDB) Error() error {
 // Reset clears out all ephemeral state objects from the state db, but keeps
 // the underlying state trie to avoid reloading data for the next operations.
 func (s *StateDB) Reset(root common.Hash) error {
-	dm := s.db.TrieDB().DiskDB().GetDomainsManager()
-	num, ok, err := kaiatrie.ReadBlockNumByRoot(dm, root.Bytes())
+	blockNum, err := blockNumberFromRoot(s.db.TrieDB().DiskDB(), root)
 	if err != nil {
 		return err
-	} else if ok {
-		s.trieOpts.BaseBlockNumber = num
-		logger.Warn("recovered block number from domains manager", "root", root.Hex())
-	} else if !common.EmptyHash(root) {
-		return fmt.Errorf("block number not found for root %s", root.Hex())
 	}
+	s.trieOpts.BaseBlockNumber = blockNum
 
 	tr, err := s.db.OpenTrie(root, s.trieOpts)
 	if err != nil {

@@ -241,7 +241,8 @@ func SetupGenesisBlock(db database.DBManager, genesis *Genesis, networkId uint64
 	// The genesis block is present in the database but the corresponding state might not.
 	// Because the trie can be partially corrupted, we always commit the trie.
 	// It can happen in a state migrated database or live pruned database.
-	commitGenesisState(genesis, db, networkId)
+	// TODO-Kaia: commit only if the state isn't committed yet.
+	//commitGenesisState(genesis, db, networkId)
 
 	// Get the existing chain configuration.
 	newcfg := genesis.configOrDefault(stored)
