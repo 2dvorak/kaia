@@ -561,10 +561,9 @@ func databaseDBManager(dbc *DBConfig) (*databaseManager, error) {
 		db.Meter(dbMetricPrefix + dbBaseDirs[et] + "/") // Each database collects metrics independently.
 	}
 
-	// TODO: use non-temporary domains manager
 	dmDir := filepath.Join(dbc.Dir, "flattrie")
 	logger.Info("Opening DomainsManager", "dir", dmDir)
-	dm, err := kaiatrie.NewTemporaryDomainsManager(dmDir)
+	dm, err := kaiatrie.NewDomainsManager(dmDir, logger)
 	if err != nil {
 		logger.Crit("Failed to create temporary domains manager", "err", err)
 	}

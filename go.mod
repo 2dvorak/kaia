@@ -3,8 +3,8 @@ module github.com/kaiachain/kaia
 go 1.23.7
 
 replace (
-	github.com/erigontech/erigon => github.com/blukat29/kaia-erigon v0.0.0-20250902154031-0b11861407b3
-	github.com/erigontech/erigon-lib => github.com/blukat29/kaia-erigon/erigon-lib v0.0.0-20250902154031-0b11861407b3
+	github.com/erigontech/erigon => github.com/blukat29/kaia-erigon v0.0.0-20250902164039-5d4e0e61be53
+	github.com/erigontech/erigon-lib => github.com/blukat29/kaia-erigon/erigon-lib v0.0.0-20250902164039-5d4e0e61be53
 	github.com/holiman/bloomfilter/v2 => github.com/AskAlexSharov/bloomfilter/v2 v2.0.9
 )
 

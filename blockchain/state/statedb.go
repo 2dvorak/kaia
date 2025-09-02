@@ -134,11 +134,13 @@ func New(root common.Hash, db Database, snaps *snapshot.Tree, opts *statedb.Trie
 	dm := db.TrieDB().DiskDB().GetDomainsManager()
 	num, ok, err := kaiatrie.ReadBlockNumByRoot(dm, root.Bytes())
 	if err != nil {
+		logger.Warn("failed to read block number from domains manager", "root", root.Hex(), "err", err)
 		return nil, err
 	} else if ok {
 		opts.BaseBlockNumber = num
 		logger.Warn("recovered block number from domains manager", "number", num, "root", root.Hex())
 	} else if !common.EmptyHash(root) {
+		logger.Warn("block number not found for root", "root", root.Hex())
 		return nil, fmt.Errorf("block number not found for root %s", root.Hex())
 	}
 
