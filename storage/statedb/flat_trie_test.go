@@ -17,6 +17,7 @@
 package statedb
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"math/big"
 	"math/rand"
@@ -32,6 +33,7 @@ import (
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,19 +54,32 @@ func Test_FlatTrie_Random(t *testing.T) {
 	// }
 	// fmt.Printf("}\n")
 
-	// accounts = [][2]string{
-	// 	{"0x9fdd7a341308e969527bd6c928068edee8399807", "0x02f849c501808003c0a041fbe8aca458c42a31464a6eff4e221b66f6ffd341a6836c33bf677f63810329a0e4fc5786883b715cd4ea3e4970357eafcd8d76c992023c590fe934d655c20dcb80"},
-	// }
-	// storages = [][3]string{
-	// 	{"0x9fdd7a341308e969527bd6c928068edee8399807", "0x0000000000000000000000000000000000000000000000000000000000000003", "0xa0424820546f6b656e000000000000000000000000000000000000000000000010"},
-	// 	{"0x9fdd7a341308e969527bd6c928068edee8399807", "0x0000000000000000000000000000000000000000000000000000000000000004", "0xa04248540000000000000000000000000000000000000000000000000000000006"},
-	// 	{"0x9fdd7a341308e969527bd6c928068edee8399807", "0x0000000000000000000000000000000000000000000000000000000000000005", "0x95efef9fe22a5e1ae68baea7069dcb1ac607ed78cf12"},
-	// 	{"0x9fdd7a341308e969527bd6c928068edee8399807", "0x0000000000000000000000000000000000000000000000000000000000000002", "0x8c033b2e3c9fd0803ce8000000"},
-	// 	{"0x9fdd7a341308e969527bd6c928068edee8399807", "0x3eaa2d76dda4c78c477b7231cb487c2b8fa646a998125bc96085f54b529e14a6", "0x8c033b2e3c9fd0803ce8000000"},
-	// }
-
 	// Correct answer calculated by SecureTrie
-	calcTrieRoots(t, func() trieInterface { return newEmptySecureTrie() }, func() trieInterface { return newEmptySecureTrie() }, accounts, storages)
+	stateRoot1, storageRoots1 := calcTrieRoots(t, func() trieInterface { return newEmptySecureTrie() }, func(common.Address) trieInterface { return newEmptySecureTrie() }, accounts, storages)
+
+	// Check the answer with FlatTrie
+	fnNewFlatAccountTrie := func() trieInterface {
+		flatAccountTrie, err := NewFlatAccountTrie(&TrieOpts{
+			BaseBlockNumber: 0,
+			CommitGenesis:   true,
+		})
+		require.NoError(t, err)
+		return flatAccountTrie
+	}
+	fnNewFlatStorageTrie := func(addr common.Address) trieInterface {
+		flatStorageTrie, err := NewFlatStorageTrie(addr, &TrieOpts{
+			BaseBlockNumber: 0,
+			CommitGenesis:   true,
+		})
+		require.NoError(t, err)
+		return flatStorageTrie
+	}
+	stateRoot2, storageRoots2 := calcTrieRoots(t, fnNewFlatAccountTrie, fnNewFlatStorageTrie, accounts, storages)
+
+	assert.Equal(t, stateRoot1, stateRoot2)
+	for addr, root := range storageRoots1 {
+		assert.Equal(t, root, storageRoots2[addr])
+	}
 }
 
 type trieInterface interface {
@@ -72,7 +87,7 @@ type trieInterface interface {
 	Hash() common.Hash
 }
 
-func calcTrieRoots(t *testing.T, fnNewAccountTrie func() trieInterface, fnNewStorageTrie func() trieInterface, accounts [][2]string, storages [][3]string) (string, map[string]string) {
+func calcTrieRoots(t *testing.T, fnNewAccountTrie func() trieInterface, fnNewStorageTrie func(common.Address) trieInterface, accounts [][2]string, storages [][3]string) (string, map[string]string) {
 	accountTrie := fnNewAccountTrie()
 	for i := 0; i < len(accounts); i++ {
 		k, v := hexutil.MustDecode(accounts[i][0]), hexutil.MustDecode(accounts[i][1])
@@ -86,8 +101,10 @@ func calcTrieRoots(t *testing.T, fnNewAccountTrie func() trieInterface, fnNewSto
 	for i := 0; i < len(storages); i++ {
 		addrS, k, v := storages[i][0], hexutil.MustDecode(storages[i][1]), hexutil.MustDecode(storages[i][2])
 		if _, ok := storageTries[addrS]; !ok {
-			storageTries[addrS] = fnNewStorageTrie()
+			storageTries[addrS] = fnNewStorageTrie(common.HexToAddress(addrS))
 		}
+		// as in state_object.go:updateStorageTrie
+		v, _ = rlp.EncodeToBytes(bytes.TrimLeft(v, "\x00"))
 		require.NoError(t, storageTries[addrS].TryUpdate(k, v))
 	}
 	for addr, trie := range storageTries {
@@ -111,7 +128,13 @@ func randTrie(t *testing.T, r *rand.Rand) ([][2]string, [][3]string) {
 			addr := randAddr(r).Hex()
 			storage := make([][3]string, r.Intn(64)) // [0, 63]
 			for j := 0; j < len(storage); j++ {
-				storage[j] = [3]string{addr, randHash(r).Hex(), randHash(r).Hex()}
+				// value with some leading zeros
+				value := randHash(r).Bytes()
+				value = value[:r.Intn(32)]
+				value = common.BytesToHash(value).Bytes()
+				// as in state_object.go:updateStorageTrie
+				value, _ = rlp.EncodeToBytes(bytes.TrimLeft(value[:], "\x00"))
+				storage[j] = [3]string{addr, randHash(r).Hex(), hexutil.Encode(value)}
 			}
 			storageRoot := correctStorageRoot(storage)
 			accounts[i] = [2]string{addr, hexutil.Encode(randSCA(t, r, storageRoot))}
