@@ -126,6 +126,19 @@ type StateDB struct {
 
 // Create a new state from a given trie.
 func New(root common.Hash, db Database, snaps *snapshot.Tree, opts *statedb.TrieOpts) (*StateDB, error) {
+	if opts == nil {
+		opts = &statedb.TrieOpts{}
+	}
+
+	dm := db.TrieDB().DiskDB().GetDomainsManager()
+	num, ok, err := dm.ReadBlockNumByRoot(root.Bytes())
+	if err != nil {
+		return nil, err
+	} else if ok {
+		logger.Warn("recovered block number from domains manager", "number", num, "root", root.Hex())
+		opts.BaseBlockNumber = num
+	}
+
 	tr, err := db.OpenTrie(root, opts)
 	if err != nil {
 		return nil, err
@@ -1183,6 +1196,11 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 		}
 		s.snap, s.snapDestructs, s.snapAccounts, s.snapStorage = nil, nil, nil, nil
 	}
+
+	dm := s.db.TrieDB().DiskDB().GetDomainsManager()
+	dm.WriteBlockNumByRoot(root.Bytes(), s.trieOpts.BaseBlockNumber+1)
+	logger.Warn("wrote block number to domains manager", "number", s.trieOpts.BaseBlockNumber+1, "root", root.Hex())
+
 	return root, err
 }
 
