@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/erigontech/erigon-lib/commitment"
+	"github.com/erigontech/erigon-lib/kaiatrie"
 	"github.com/erigontech/erigon-lib/state"
 	"github.com/kaiachain/kaia/blockchain/types/account"
 	"github.com/kaiachain/kaia/blockchain/types/accountkey"
@@ -37,6 +38,7 @@ import (
 func Test_FlatTrie_Import(t *testing.T) {
 	t.Log(commitment.ModeDirect)
 	t.Log(len(state.Schema))
+	t.Log(kaiatrie.ModeRawBytes)
 }
 
 func Test_FlatTrie_Random(t *testing.T) {

@@ -87,6 +87,8 @@ github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6r
 github.com/bits-and-blooms/bitset v1.12.0/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
 github.com/bits-and-blooms/bitset v1.20.0 h1:2F+rfL86jE2d/bmw7OhqUg2Sj/1rURkBn3MdfoPyRVU=
 github.com/bits-and-blooms/bitset v1.20.0/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
+github.com/blukat29/kaia-erigon/erigon-lib v0.0.0-20250902092045-1112fea3fd4d h1:qCLrj1AyQkRcU3onx0US+Jr8YU0NTzHDN1lHLeLs++I=
+github.com/blukat29/kaia-erigon/erigon-lib v0.0.0-20250902092045-1112fea3fd4d/go.mod h1:wSawlUgWChMvnTU8yI+IJboQPktec42IBiUl/EL3A2s=
 github.com/bmizerany/pat v0.0.0-20170815010413-6226ea591a40/go.mod h1:8rLXio+WjiTceGBHIoTvn60HIbs7Hm7bcHjyrSqYB9c=
 github.com/boltdb/bolt v1.3.1/go.mod h1:clJnj/oiGkjum5o1McbSZDSLxVThjynRyGBgiAx27Ps=
 github.com/bt51/ntpclient v0.0.0-20140310165113-3045f71e2530 h1:2W1J2qL8feh1Av0KJq5cbBACg+lx6DfIm18vt45P+DA=
@@ -390,8 +392,6 @@ github.com/julienschmidt/httprouter v1.3.0 h1:U0609e9tgbseu3rBINet9P48AI/D3oJs4d
 github.com/julienschmidt/httprouter v1.3.0/go.mod h1:JR6WtHb+2LUe8TCKY3cZOxFyyO8IZAc4RVcycCCAKdM=
 github.com/jung-kurt/gofpdf v1.0.3-0.20190309125859-24315acbbda5/go.mod h1:7Id9E/uU8ce6rXgefFLlgrJj/GYY22cpxn+r32jIOes=
 github.com/jwilder/encoding v0.0.0-20170811194829-b4e1701a28ef/go.mod h1:Ct9fl0F6iIOGgxJ5npU/IUOhOhqlVrGjyIZc8/MagT0=
-github.com/kaiachain/kaia-erigon/erigon-lib v0.0.0-20250723081440-1a610b3f574d h1:6ViTCaJiYedJ0WNZBNv5srDT85ovHT8TSQl0oZ363EI=
-github.com/kaiachain/kaia-erigon/erigon-lib v0.0.0-20250723081440-1a610b3f574d/go.mod h1:wSawlUgWChMvnTU8yI+IJboQPktec42IBiUl/EL3A2s=
 github.com/kisielk/errcheck v1.2.0/go.mod h1:/BMXB+zMLi60iA8Vv6Ksmxu/1UDYcXs4uQLJ+jE2L00=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
