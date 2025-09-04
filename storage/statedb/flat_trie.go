@@ -121,7 +121,7 @@ func (t *FlatAccountTrie) Prove(key []byte, fromLevel uint, proofDb database.DBM
 }
 
 type FlatStorageTrie struct {
-	dt *kaiatrie.DeferredStorageTrie
+	dt *kaiatrie.DeferredStorageTrie2
 
 	baseNum uint64
 }
@@ -130,7 +130,10 @@ func NewFlatStorageTrie(dm *kaiatrie.DomainsManager, addr common.Address, storag
 	if opts == nil {
 		opts = &TrieOpts{}
 	}
-	dt := kaiatrie.NewDeferredStorageTrie(dm, addr.Bytes(), storageRoot.Bytes(), opts.BaseBlockNumber, opts.CommitGenesis, kaiatrie.ModeRawBytes)
+	if opts.AccountTrie == nil {
+		return nil, fmt.Errorf("account trie is not set")
+	}
+	dt := kaiatrie.NewDeferredStorageTrie2(opts.AccountTrie.dt, addr.Bytes(), storageRoot.Bytes())
 	return &FlatStorageTrie{dt: dt, baseNum: opts.BaseBlockNumber}, nil
 }
 

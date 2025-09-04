@@ -141,6 +141,10 @@ func New(root common.Hash, db Database, snaps *snapshot.Tree, opts *statedb.Trie
 	if err != nil {
 		return nil, err
 	}
+	if at, ok := tr.(*statedb.FlatAccountTrie); ok {
+		opts.AccountTrie = at
+	}
+
 	sdb := &StateDB{
 		db:                       db,
 		trie:                     tr,

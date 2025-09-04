@@ -44,6 +44,7 @@ type TrieOpts struct {
 	BaseBlockNumber uint64
 	// If CommitGenesis is true, FlatTrie will commit to block 0. Otherwise, it will commit to (BaseBlockNumber+1).
 	CommitGenesis bool
+	AccountTrie   *FlatAccountTrie
 }
 
 // LeafCallback is a callback type invoked when a trie operation reaches a leaf
