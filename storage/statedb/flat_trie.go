@@ -17,6 +17,7 @@
 package statedb
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -143,7 +144,11 @@ func (t *FlatStorageTrie) GetKey(key []byte) []byte {
 }
 
 func (t *FlatStorageTrie) TryGet(key []byte) ([]byte, error) {
-	return t.dt.Get(key)
+	value, err := t.dt.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	return rlp.EncodeToBytes(bytes.TrimLeft(value[:], "\x00"))
 }
 
 func (t *FlatStorageTrie) TryUpdate(key, value []byte) error {
