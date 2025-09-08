@@ -31,6 +31,7 @@ import (
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/hexutil"
 	"github.com/kaiachain/kaia/crypto"
+	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/stretchr/testify/assert"
@@ -44,8 +45,9 @@ func Test_FlatTrie_Import(t *testing.T) {
 }
 
 func Test_FlatTrie_Random(t *testing.T) {
+	log.EnableLogForTest(log.LvlCrit, log.LvlWarn)
 	r := rand.New(rand.NewSource(42)) // for determinism
-	accounts, storages := randTrie(t, r)
+	accounts, storages := randTrie(t, r, 2, 1)
 
 	// To use in other test files
 	// fmt.Printf("accounts = [][2]string{\n")
@@ -54,75 +56,170 @@ func Test_FlatTrie_Random(t *testing.T) {
 	// }
 	// fmt.Printf("}\n")
 
-	// Correct answer calculated by SecureTrie
-	stateRoot1, storageRoots1 := calcTrieRoots(t, func() trieInterface { return newEmptySecureTrie() }, func(common.Address) trieInterface { return newEmptySecureTrie() }, accounts, storages)
+	// Construct the tries in both SecureTrie and FlatTrie
+	secureTrie := newEmptySecureTrie()
+	fnNewSecureTrie := func(common.Address) trieInterface { return newEmptySecureTrie() }
+	accountTrie1, storageTries1 := constructTrie(t, secureTrie, fnNewSecureTrie, accounts, storages)
 
-	// Check the answer with FlatTrie
 	dm, err := kaiatrie.NewTemporaryDomainsManager(t.TempDir())
 	require.NoError(t, err)
 	defer dm.Close()
 
-	fnNewFlatAccountTrie := func() trieInterface {
-		flatAccountTrie, err := NewFlatAccountTrie(dm, &TrieOpts{
-			BaseBlockNumber: 0,
-			CommitGenesis:   true,
-		})
-		require.NoError(t, err)
-		return flatAccountTrie
-	}
+	flatAccountTrie, err := NewFlatAccountTrie(dm, &TrieOpts{
+		BaseBlockNumber: 0,
+		CommitGenesis:   true,
+	})
+	require.NoError(t, err)
 	fnNewFlatStorageTrie := func(addr common.Address) trieInterface {
 		flatStorageTrie, err := NewFlatStorageTrie(dm, addr, common.Hash{}, &TrieOpts{
 			BaseBlockNumber: 0,
 			CommitGenesis:   true,
+			AccountTrie:     flatAccountTrie,
 		})
 		require.NoError(t, err)
 		return flatStorageTrie
 	}
-	stateRoot2, storageRoots2 := calcTrieRoots(t, fnNewFlatAccountTrie, fnNewFlatStorageTrie, accounts, storages)
+	accountTrie2, storageTries2 := constructTrie(t, flatAccountTrie, fnNewFlatStorageTrie, accounts, storages)
 
+	// Compare the trie roots
+	stateRoot1, storageRoots1 := calcTrieRoots(t, accountTrie1, storageTries1)
+	stateRoot2, storageRoots2 := calcTrieRoots(t, accountTrie2, storageTries2)
 	assert.Equal(t, stateRoot1, stateRoot2)
 	for addr, root := range storageRoots1 {
 		assert.Equal(t, root, storageRoots2[addr])
 	}
+
+	// Check the Get() function
+	checkTrieGet(t, accountTrie1, storageTries1, accounts, storages)
+	checkTrieGet(t, accountTrie2, storageTries2, accounts, storages)
+
+	// Check the NodeIterator() function, only at the leaf nodes
+	checkNodeIterator(t, accountTrie1, storageTries1, accounts, storages)
+	checkNodeIterator(t, accountTrie2, storageTries2, accounts, storages)
 }
 
+// Trie checking helpers
 type trieInterface interface {
+	GetKey(key []byte) []byte
 	TryUpdate(key, value []byte) error
+	TryGet(key []byte) ([]byte, error)
 	Hash() common.Hash
+	Commit(onleaf LeafCallback) (common.Hash, error)
+	NodeIterator(start []byte) NodeIterator
 }
 
-func calcTrieRoots(t *testing.T, fnNewAccountTrie func() trieInterface, fnNewStorageTrie func(common.Address) trieInterface, accounts [][2]string, storages [][3]string) (string, map[string]string) {
-	accountTrie := fnNewAccountTrie()
-	for i := 0; i < len(accounts); i++ {
-		k, v := hexutil.MustDecode(accounts[i][0]), hexutil.MustDecode(accounts[i][1])
+func constructTrie(t *testing.T, accountTrie trieInterface, fnNewStorageTrie func(common.Address) trieInterface, accounts [][2]string, storages [][3]string) (trieInterface, map[string]trieInterface) {
+	for _, a := range accounts {
+		k, v := hexutil.MustDecode(a[0]), hexutil.MustDecode(a[1])
 		require.NoError(t, accountTrie.TryUpdate(k, v))
 	}
-	stateRoot := accountTrie.Hash().Hex()
-	t.Logf("stateRoot = %s", stateRoot)
 
 	storageTries := make(map[string]trieInterface)
-	storageRoots := make(map[string]string)
-	for i := 0; i < len(storages); i++ {
-		addrS, k, v := storages[i][0], hexutil.MustDecode(storages[i][1]), hexutil.MustDecode(storages[i][2])
+	for _, s := range storages {
+		addrS, k, v := s[0], hexutil.MustDecode(s[1]), hexutil.MustDecode(s[2])
 		if _, ok := storageTries[addrS]; !ok {
 			storageTries[addrS] = fnNewStorageTrie(common.HexToAddress(addrS))
 		}
-		// as in state_object.go:updateStorageTrie
-		v, _ = rlp.EncodeToBytes(bytes.TrimLeft(v, "\x00"))
 		require.NoError(t, storageTries[addrS].TryUpdate(k, v))
 	}
+
+	return accountTrie, storageTries
+}
+
+func calcTrieRoots(t *testing.T, accountTrie trieInterface, storageTries map[string]trieInterface) (string, map[string]string) {
+	storageRoots := make(map[string]string)
 	for addr, trie := range storageTries {
-		storageRoots[addr] = trie.Hash().Hex()
+		root, err := trie.Commit(nil)
+		require.NoError(t, err)
+		storageRoots[addr] = root.Hex()
 		t.Logf("storageRoot[%s] = %s", addr, storageRoots[addr])
 	}
+
+	root, err := accountTrie.Commit(nil)
+	require.NoError(t, err)
+	stateRoot := root.Hex()
+	t.Logf("stateRoot = %s", stateRoot)
 
 	return stateRoot, storageRoots
 }
 
+func checkTrieGet(t *testing.T, accountTrie trieInterface, storageTries map[string]trieInterface, accounts [][2]string, storages [][3]string) {
+	for _, a := range accounts {
+		k, v := hexutil.MustDecode(a[0]), hexutil.MustDecode(a[1])
+		value, err := accountTrie.TryGet(k)
+		require.NoError(t, err)
+		assert.Equal(t, v, value)
+	}
+	for _, s := range storages {
+		addrS, k, v := s[0], hexutil.MustDecode(s[1]), hexutil.MustDecode(s[2])
+		storageTrie := storageTries[addrS]
+		require.NotNil(t, storageTrie)
+
+		value, err := storageTrie.TryGet(k)
+		require.NoError(t, err)
+		assert.Equal(t, v, value)
+	}
+}
+
+func checkNodeIterator(t *testing.T, accountTrie trieInterface, storageTries map[string]trieInterface, accounts [][2]string, storages [][3]string) {
+	{
+		// iterate over the whole account trie
+		iterated := make(map[string]string)
+		it := accountTrie.NodeIterator(nil)
+		for it.Next(true) {
+			if !it.Leaf() {
+				continue
+			}
+			k, v := it.LeafKey(), it.LeafBlob()
+			k = accountTrie.GetKey(k)
+			iterated[common.BytesToAddress(k).Hex()] = hexutil.Encode(v)
+		}
+		// Compare with the correct answer
+		assert.Equal(t, len(iterated), len(accounts)) // |iterated| = |accounts|
+		for _, a := range accounts {                  // {accounts} in {iterated}
+			addrS, accS := a[0], a[1]
+			assert.Equal(t, accS, iterated[addrS], "addr = %s, acc = %s", addrS, accS)
+		}
+	}
+	{
+		iterated := make(map[string]map[string]string)
+		its := make(map[string]NodeIterator)
+		// batch create iterators
+		for _, s := range storages {
+			addrS := s[0]
+			if _, ok := its[addrS]; !ok {
+				iterated[addrS] = make(map[string]string)
+				storageTrie := storageTries[addrS]
+				require.NotNil(t, storageTrie)
+				its[addrS] = storageTrie.NodeIterator(nil)
+			}
+		}
+		// run one iterator at a time
+		count := 0
+		for addrS, it := range its {
+			for it.Next(true) {
+				if !it.Leaf() {
+					continue
+				}
+				k, v := it.LeafKey(), it.LeafBlob()
+				k = storageTries[addrS].GetKey(k)
+				iterated[addrS][hexutil.Encode(k)] = hexutil.Encode(v)
+				count++
+			}
+		}
+		// Compare with the correct answer
+		assert.Equal(t, len(storages), count)
+		for _, s := range storages {
+			addrS, kS, vS := s[0], s[1], s[2]
+			assert.Equal(t, vS, iterated[addrS][kS], "addr = %s, k = %s, v = %s", addrS, kS, vS)
+		}
+	}
+}
+
 // Random accounts generator
 
-func randTrie(t *testing.T, r *rand.Rand) ([][2]string, [][3]string) {
-	accounts := make([][2]string, 64)
+func randTrie(t *testing.T, r *rand.Rand, numAccounts, maxSlotsPerAccount int) ([][2]string, [][3]string) {
+	accounts := make([][2]string, numAccounts)
 	storages := make([][3]string, 0)
 	for i := 0; i < len(accounts); i++ {
 		if i%2 == 0 { // EOA
@@ -130,7 +227,7 @@ func randTrie(t *testing.T, r *rand.Rand) ([][2]string, [][3]string) {
 			continue
 		} else { // SCA
 			addr := randAddr(r).Hex()
-			storage := make([][3]string, r.Intn(64)) // [0, 63]
+			storage := make([][3]string, r.Intn(maxSlotsPerAccount+1)) // [0, maxSlotsPerAccount)
 			for j := 0; j < len(storage); j++ {
 				// value with some leading zeros
 				value := randHash(r).Bytes()

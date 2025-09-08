@@ -24,6 +24,7 @@ import (
 
 	"github.com/erigontech/erigon-lib/kaiatrie"
 	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/kaiachain/kaia/storage/database"
 )
@@ -48,6 +49,7 @@ func getDm() *kaiatrie.DomainsManager {
 }
 
 type FlatAccountTrie struct {
+	dm *kaiatrie.DomainsManager
 	dt *kaiatrie.DeferredAccountTrie
 
 	baseNum uint64
@@ -58,12 +60,12 @@ func NewFlatAccountTrie(dm *kaiatrie.DomainsManager, opts *TrieOpts) (*FlatAccou
 		opts = &TrieOpts{}
 	}
 	dt := kaiatrie.NewDeferredAccountTrie(dm, opts.BaseBlockNumber, opts.CommitGenesis, kaiatrie.ModeRawBytes)
-	return &FlatAccountTrie{dt: dt, baseNum: opts.BaseBlockNumber}, nil
+	return &FlatAccountTrie{dm: dm, dt: dt, baseNum: opts.BaseBlockNumber}, nil
 }
 
 func (t *FlatAccountTrie) GetKey(key []byte) []byte {
-	logger.Error("FlatAccountTrie.GetKey is not implemented")
-	return nil
+	//logger.Error("FlatAccountTrie.GetKey is not implemented")
+	return key
 }
 
 func (t *FlatAccountTrie) TryGet(key []byte) ([]byte, error) {
@@ -112,8 +114,12 @@ func (t *FlatAccountTrie) CommitExt(onleaf LeafCallback) (common.ExtHash, error)
 }
 
 func (t *FlatAccountTrie) NodeIterator(start []byte) NodeIterator {
-	logger.Error("FlatAccountTrie.NodeIterator is not implemented")
-	return &FlatNodeIterator{}
+	dit, err := kaiatrie.NewAccountIterator(t.dm, t.baseNum)
+	if err != nil {
+		logger.Error("Failed to create FlatAccountTrie.NodeIterator", "err", err)
+		return &EmptyNodeIterator{}
+	}
+	return &FlatNodeIterator{dit: dit}
 }
 
 func (t *FlatAccountTrie) Prove(key []byte, fromLevel uint, proofDb database.DBManager) error {
@@ -122,8 +128,10 @@ func (t *FlatAccountTrie) Prove(key []byte, fromLevel uint, proofDb database.DBM
 }
 
 type FlatStorageTrie struct {
+	dm *kaiatrie.DomainsManager
 	dt *kaiatrie.DeferredStorageTrie2
 
+	addr    common.Address
 	baseNum uint64
 }
 
@@ -135,12 +143,11 @@ func NewFlatStorageTrie(dm *kaiatrie.DomainsManager, addr common.Address, storag
 		return nil, fmt.Errorf("account trie is not set")
 	}
 	dt := kaiatrie.NewDeferredStorageTrie2(opts.AccountTrie.dt, addr.Bytes(), storageRoot.Bytes())
-	return &FlatStorageTrie{dt: dt, baseNum: opts.BaseBlockNumber}, nil
+	return &FlatStorageTrie{dm: dm, dt: dt, addr: addr, baseNum: opts.BaseBlockNumber}, nil
 }
 
 func (t *FlatStorageTrie) GetKey(key []byte) []byte {
-	logger.Error("FlatStorageTrie.GetKey is not implemented")
-	return nil
+	return key
 }
 
 func (t *FlatStorageTrie) TryGet(key []byte) ([]byte, error) {
@@ -197,8 +204,12 @@ func (t *FlatStorageTrie) CommitExt(onleaf LeafCallback) (common.ExtHash, error)
 }
 
 func (t *FlatStorageTrie) NodeIterator(start []byte) NodeIterator {
-	logger.Error("FlatStorageTrie.NodeIterator is not implemented")
-	return &FlatNodeIterator{}
+	dit, err := kaiatrie.NewStorageIterator(t.dm, t.addr.Bytes(), t.baseNum)
+	if err != nil {
+		logger.Error("Failed to create FlatStorageTrie.NodeIterator", "err", err)
+		return &EmptyNodeIterator{}
+	}
+	return &FlatNodeIterator{dit: dit, isStorage: true}
 }
 
 func (t *FlatStorageTrie) Prove(key []byte, fromLevel uint, proofDb database.DBManager) error {
@@ -206,45 +217,113 @@ func (t *FlatStorageTrie) Prove(key []byte, fromLevel uint, proofDb database.DBM
 	return errors.New("not implemented")
 }
 
-// TODO: Fill this.
+type EmptyNodeIterator struct {
+}
+
+func (nit *EmptyNodeIterator) Next(bool) bool {
+	return false
+}
+
+func (nit *EmptyNodeIterator) Error() error {
+	return nil
+}
+
+func (nit *EmptyNodeIterator) Hash() common.Hash {
+	return common.Hash{}
+}
+
+func (nit *EmptyNodeIterator) Parent() common.Hash {
+	return common.Hash{}
+}
+
+func (nit *EmptyNodeIterator) Path() []byte {
+	return nil
+}
+
+func (nit *EmptyNodeIterator) Leaf() bool {
+	return true
+}
+
+func (nit *EmptyNodeIterator) LeafKey() []byte {
+	return nil
+}
+
+func (nit *EmptyNodeIterator) LeafBlob() []byte {
+	return nil
+}
+
+func (nit *EmptyNodeIterator) LeafProof() [][]byte {
+	return nil
+}
+
+func (nit *EmptyNodeIterator) AddResolver(database.DBManager) {
+	// do nothing
+}
+
+// TODO: Add close() method
 type FlatNodeIterator struct {
+	dit       *kaiatrie.DomainIterator
+	isStorage bool
+
+	lastKey   []byte
+	lastValue []byte
+	lastErr   error
 }
 
-func (t *FlatNodeIterator) Next(bool) bool {
-	return false
+func NewFlatAccountIterator(t *FlatAccountTrie) (*FlatNodeIterator, error) {
+	dit, err := kaiatrie.NewAccountIterator(t.dm, t.baseNum)
+	if err != nil {
+		return nil, err
+	}
+	return &FlatNodeIterator{dit: dit}, nil
 }
 
-func (t *FlatNodeIterator) Error() error {
-	return nil
+func (nit *FlatNodeIterator) Next(bool) bool {
+	var ok bool
+	nit.lastKey, nit.lastValue, ok, nit.lastErr = nit.dit.Next()
+	if nit.isStorage {
+		nit.lastValue, _ = rlp.EncodeToBytes(nit.lastValue)
+	}
+	if ok && nit.lastErr == nil {
+		return true
+	} else {
+		nit.dit.Close()
+		return false
+	}
 }
 
-func (t *FlatNodeIterator) Hash() common.Hash {
-	return common.Hash{}
+func (nit *FlatNodeIterator) Error() error {
+	return nit.lastErr
 }
 
-func (t *FlatNodeIterator) Parent() common.Hash {
-	return common.Hash{}
+func (nit *FlatNodeIterator) Hash() common.Hash {
+	return common.BytesToHash(crypto.Keccak256(nit.lastValue))
 }
 
-func (t *FlatNodeIterator) Path() []byte {
-	return nil
+func (nit *FlatNodeIterator) Parent() common.Hash {
+	return common.Hash{} // not supported
 }
 
-func (t *FlatNodeIterator) Leaf() bool {
-	return false
+func (nit *FlatNodeIterator) Path() []byte {
+	return nil // not supported
 }
 
-func (t *FlatNodeIterator) LeafKey() []byte {
-	return nil
+func (nit *FlatNodeIterator) Leaf() bool {
+	return true // always leaf
 }
 
-func (t *FlatNodeIterator) LeafBlob() []byte {
-	return nil
+func (nit *FlatNodeIterator) LeafKey() []byte {
+	return nit.lastKey
 }
 
-func (t *FlatNodeIterator) LeafProof() [][]byte {
-	return nil
+func (nit *FlatNodeIterator) LeafBlob() []byte {
+	return nit.lastValue
 }
 
-func (t *FlatNodeIterator) AddResolver(database.DBManager) {
+func (nit *FlatNodeIterator) LeafProof() [][]byte {
+	return nil // not supported
+}
+
+func (nit *FlatNodeIterator) AddResolver(database.DBManager) {
+	// do nothing
 }
