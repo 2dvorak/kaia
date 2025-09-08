@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/erigontech/erigon-lib/kaiatrie"
 	"github.com/kaiachain/kaia/common"
@@ -29,25 +28,6 @@ import (
 	"github.com/kaiachain/kaia/storage/database"
 )
 
-var (
-	singletonDM *kaiatrie.DomainsManager
-)
-
-func getDm() *kaiatrie.DomainsManager {
-	if singletonDM == nil {
-		tmpdir, err := os.MkdirTemp(os.TempDir(), "kaiatrie")
-		if err != nil {
-			logger.Crit("Failed to create temporary directory", "err", err)
-		}
-		singletonDM, err = kaiatrie.NewTemporaryDomainsManager(tmpdir)
-		if err != nil {
-			logger.Crit("Failed to create temporary domains manager", "err", err)
-		}
-		logger.Warn("Created temporary directory for FlatAccountTrie", "dir", tmpdir)
-	}
-	return singletonDM
-}
-
 type FlatAccountTrie struct {
 	dm *kaiatrie.DomainsManager
 	dt *kaiatrie.DeferredAccountTrie
@@ -55,11 +35,11 @@ type FlatAccountTrie struct {
 	baseNum uint64
 }
 
-func NewFlatAccountTrie(dm *kaiatrie.DomainsManager, opts *TrieOpts) (*FlatAccountTrie, error) {
+func NewFlatAccountTrie(dm *kaiatrie.DomainsManager, root common.Hash, opts *TrieOpts) (*FlatAccountTrie, error) {
 	if opts == nil {
 		opts = &TrieOpts{}
 	}
-	dt := kaiatrie.NewDeferredAccountTrie(dm, opts.BaseBlockNumber, opts.CommitGenesis, kaiatrie.ModeRawBytes)
+	dt := kaiatrie.NewDeferredAccountTrie(dm, root.Bytes(), opts.BaseBlockNumber, opts.CommitGenesis, kaiatrie.ModeRawBytes)
 	return &FlatAccountTrie{dm: dm, dt: dt, baseNum: opts.BaseBlockNumber}, nil
 }
 
@@ -262,7 +242,7 @@ func (nit *EmptyNodeIterator) AddResolver(database.DBManager) {
 
 // TODO: Add close() method
 type FlatNodeIterator struct {
-	dit       *kaiatrie.DomainIterator
+	dit       *kaiatrie.DomainsIterator
 	isStorage bool
 
 	lastKey   []byte

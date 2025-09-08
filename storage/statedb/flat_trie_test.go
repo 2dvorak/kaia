@@ -65,7 +65,7 @@ func Test_FlatTrie_Random(t *testing.T) {
 	require.NoError(t, err)
 	defer dm.Close()
 
-	flatAccountTrie, err := NewFlatAccountTrie(dm, &TrieOpts{
+	flatAccountTrie, err := NewFlatAccountTrie(dm, common.Hash{}, &TrieOpts{
 		BaseBlockNumber: 0,
 		CommitGenesis:   true,
 	})
