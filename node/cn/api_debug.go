@@ -72,7 +72,7 @@ func (api *DebugCNAPI) DumpBlock(ctx context.Context, blockNrOrHash rpc.BlockNum
 			return state.Dump{}, fmt.Errorf("block %v not found", blockNrOrHashString)
 		}
 	}
-	stateDb, err := api.cn.BlockChain().StateAtWithPersistent(block.Root())
+	stateDb, err := api.cn.BlockChain().StateAt(block.Root())
 	if err != nil {
 		return state.Dump{}, err
 	}
