@@ -87,8 +87,8 @@ github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6r
 github.com/bits-and-blooms/bitset v1.12.0/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
 github.com/bits-and-blooms/bitset v1.20.0 h1:2F+rfL86jE2d/bmw7OhqUg2Sj/1rURkBn3MdfoPyRVU=
 github.com/bits-and-blooms/bitset v1.20.0/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
-github.com/blukat29/kaia-erigon/erigon-lib v0.0.0-20250909065725-d31ce6aa6266 h1:mJ/qGZm31m4/CILUTC1zOCdUJam/LbhBgqErxGN2Y5A=
-github.com/blukat29/kaia-erigon/erigon-lib v0.0.0-20250909065725-d31ce6aa6266/go.mod h1:wSawlUgWChMvnTU8yI+IJboQPktec42IBiUl/EL3A2s=
+github.com/blukat29/kaia-erigon/erigon-lib v0.0.0-20250909171745-2600ce5b9ea6 h1:tvRlHbWDWONi3JpNi4n1CF6EluYa2uJy3jALX8tQVWI=
+github.com/blukat29/kaia-erigon/erigon-lib v0.0.0-20250909171745-2600ce5b9ea6/go.mod h1:wSawlUgWChMvnTU8yI+IJboQPktec42IBiUl/EL3A2s=
 github.com/bmizerany/pat v0.0.0-20170815010413-6226ea591a40/go.mod h1:8rLXio+WjiTceGBHIoTvn60HIbs7Hm7bcHjyrSqYB9c=
 github.com/boltdb/bolt v1.3.1/go.mod h1:clJnj/oiGkjum5o1McbSZDSLxVThjynRyGBgiAx27Ps=
 github.com/bt51/ntpclient v0.0.0-20140310165113-3045f71e2530 h1:2W1J2qL8feh1Av0KJq5cbBACg+lx6DfIm18vt45P+DA=
