@@ -452,12 +452,14 @@ func NewMemoryDBManager() DBManager {
 	}
 	dbm.dbs[0] = NewMemDB()
 
-	logger.Info("Opening DomainsManager", "dir", os.TempDir())
-	dm, err := kaiatrie.NewTemporaryDomainsManager(os.TempDir())
-	if err != nil {
-		logger.Crit("Failed to create temporary domains manager", "err", err)
+	if common.FlatTrie {
+		logger.Info("Opening DomainsManager", "dir", os.TempDir())
+		dm, err := kaiatrie.NewTemporaryDomainsManager(os.TempDir())
+		if err != nil {
+			logger.Crit("Failed to create temporary domains manager", "err", err)
+		}
+		dbm.dm = dm
 	}
-	dbm.dm = dm
 
 	return &dbm
 }
@@ -561,13 +563,15 @@ func databaseDBManager(dbc *DBConfig) (*databaseManager, error) {
 		db.Meter(dbMetricPrefix + dbBaseDirs[et] + "/") // Each database collects metrics independently.
 	}
 
-	dmDir := filepath.Join(dbc.Dir, "flattrie")
-	logger.Info("Opening DomainsManager", "dir", dmDir)
-	dm, err := kaiatrie.NewDomainsManager(dmDir, logger)
-	if err != nil {
-		logger.Crit("Failed to create temporary domains manager", "err", err)
+	if common.FlatTrie {
+		dmDir := filepath.Join(dbc.Dir, "flattrie")
+		logger.Info("Opening DomainsManager", "dir", dmDir)
+		dm, err := kaiatrie.NewDomainsManager(dmDir, logger)
+		if err != nil {
+			logger.Crit("Failed to create temporary domains manager", "err", err)
+		}
+		dbm.dm = dm
 	}
-	dbm.dm = dm
 
 	return dbm, nil
 }

@@ -172,7 +172,13 @@ func New(root common.Hash, db Database, snaps *snapshot.Tree, opts *statedb.Trie
 	return sdb, nil
 }
 
+// This function is for FlatTrie only.
 func blockNumberFromRoot(dbm database.DBManager, root common.Hash) (uint64, error) {
+	// If not FlatTrie, we only need the root and don't need to find the block number.
+	if !common.FlatTrie {
+		return 0, nil
+	}
+
 	// empty temporary trie or genesis block
 	if common.EmptyHash(root) {
 		return 0, nil

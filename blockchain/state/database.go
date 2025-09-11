@@ -167,14 +167,20 @@ type cachingDB struct {
 
 // OpenTrie opens the main account trie at a specific root hash.
 func (db *cachingDB) OpenTrie(root common.Hash, opts *statedb.TrieOpts) (Trie, error) {
-	//return statedb.NewSecureTrie(root, db.db, opts)
-	return statedb.NewFlatAccountTrie(db.db.DiskDB().GetDomainsManager(), root, opts)
+	if common.FlatTrie {
+		return statedb.NewFlatAccountTrie(db.db.DiskDB().GetDomainsManager(), root, opts)
+	} else {
+		return statedb.NewSecureTrie(root, db.db, opts)
+	}
 }
 
 // OpenStorageTrie opens the storage trie of an account.
 func (db *cachingDB) OpenStorageTrie(addr common.Address, root common.ExtHash, opts *statedb.TrieOpts) (Trie, error) {
-	//return statedb.NewSecureStorageTrie(root, db.db, opts)
-	return statedb.NewFlatStorageTrie(db.db.DiskDB().GetDomainsManager(), addr, root.Unextend(), opts)
+	if common.FlatTrie {
+		return statedb.NewFlatStorageTrie(db.db.DiskDB().GetDomainsManager(), addr, root.Unextend(), opts)
+	} else {
+		return statedb.NewSecureStorageTrie(root, db.db, opts)
+	}
 }
 
 // CopyTrie returns an independent copy of the given trie.
