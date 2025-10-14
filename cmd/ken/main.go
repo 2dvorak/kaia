@@ -23,9 +23,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/kaiachain/kaia/api/debug"
 	"github.com/kaiachain/kaia/cmd/utils"
@@ -41,6 +43,10 @@ var (
 
 	// The app that holds all commands and flags.
 	app = utils.NewApp(nodecmd.GetGitCommit(), "The command line interface for Kaia Endpoint Node")
+
+	// Context for cache stats printer
+	cacheStatsCtx    context.Context
+	cacheStatsCancel context.CancelFunc
 )
 
 func init() {
@@ -81,9 +87,26 @@ func init() {
 
 	app.CommandNotFound = nodecmd.CommandNotExist
 	app.OnUsageError = nodecmd.OnUsageError
-	app.Before = nodecmd.BeforeRunNode
+	app.Before = func(ctx *cli.Context) error {
+		// Run the original BeforeRunNode
+		if err := nodecmd.BeforeRunNode(ctx); err != nil {
+			return err
+		}
+
+		// Start cache stats printer (prints every 1 minute)
+		cacheStatsCtx, cacheStatsCancel = context.WithCancel(context.Background())
+		startCacheStatsPrinter(cacheStatsCtx, 1*time.Minute)
+		logger.Info("Started cache statistics printer", "interval", "1 minute")
+
+		return nil
+	}
 	app.After = func(ctx *cli.Context) error {
-		// Print address hex cache statistics before exit
+		// Stop cache stats printer
+		if cacheStatsCancel != nil {
+			cacheStatsCancel()
+		}
+
+		// Print final address hex cache statistics before exit
 		printCacheStatsOnExit()
 		debug.Exit()
 		console.Stdin.Close() // Resets terminal mode.
