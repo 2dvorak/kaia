@@ -30,6 +30,7 @@ import (
 	"github.com/kaiachain/kaia/api/debug"
 	"github.com/kaiachain/kaia/cmd/utils"
 	"github.com/kaiachain/kaia/cmd/utils/nodecmd"
+	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/console"
 	"github.com/kaiachain/kaia/log"
 	"github.com/urfave/cli/v2"
@@ -82,6 +83,8 @@ func init() {
 	app.OnUsageError = nodecmd.OnUsageError
 	app.Before = nodecmd.BeforeRunNode
 	app.After = func(ctx *cli.Context) error {
+		// Print address hex cache statistics before exit
+		printCacheStatsOnExit()
 		debug.Exit()
 		console.Stdin.Close() // Resets terminal mode.
 		return nil
@@ -96,4 +99,26 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// printCacheStatsOnExit prints address hex cache statistics when ken exits
+func printCacheStatsOnExit() {
+	stats := common.GetAddressCacheStats()
+	logger.Info("═══════════════════════════════════════════════════════════════")
+	logger.Info("Address Hex Cache Statistics")
+	logger.Info("═══════════════════════════════════════════════════════════════")
+	logger.Info("Cache Configuration",
+		"size", stats.CacheSize,
+		"used", stats.CacheLen,
+		"usage%", fmt.Sprintf("%.1f", float64(stats.CacheLen)/float64(stats.CacheSize)*100))
+	logger.Info("Hit Ratio Statistics",
+		"hitRatio%", fmt.Sprintf("%.2f", stats.HitRatio),
+		"hits", stats.Hits,
+		"misses", stats.Misses,
+		"total", stats.Total)
+	logger.Info("Memory Statistics",
+		"currentMB", fmt.Sprintf("%.2f", float64(stats.CurrentMemory)/1024/1024),
+		"deltaMB", fmt.Sprintf("%.2f", float64(stats.MemoryDelta)/1024/1024))
+	logger.Info("Runtime", "uptime", stats.Uptime.Round(1000000000)) // Round to seconds
+	logger.Info("═══════════════════════════════════════════════════════════════")
 }

@@ -33,6 +33,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bluele/gcache"
+	lru "github.com/hashicorp/golang-lru"
 	"github.com/kaiachain/kaia/common/hexutil"
 	"github.com/kaiachain/kaia/crypto/sha3"
 )
@@ -69,11 +71,28 @@ var (
 	extHashZeroCounter = ExtHashCounter{0, 0, 0, 0, 0, 0, 0}
 )
 
+var (
+	// Global address to hex cache
+	AddressHexCacheSize = 1000
+	addressHexCache     gcache.Cache
+)
+
 func init() {
 	extHashLastCounter = uint64(time.Now().UnixNano() >> 8)
 	if extHashLastCounter == 0 {
 		panic("Failed to retrieve current timestamp for ExtHashCounter")
 	}
+
+	_, err := lru.New(AddressHexCacheSize)
+	if err != nil {
+		logger.Crit("Failed to allocate address hex cache", "err", err)
+	}
+	//addressHexCache = cache
+
+	// Initialize LFU cache from bluele/gcache
+	addressHexCache = gcache.New(AddressHexCacheSize).
+		LFU().
+		Build()
 }
 
 // Hash represents the 32 byte Keccak256 hash of arbitrary data.
@@ -380,6 +399,22 @@ func (a Address) Hash() Hash { return BytesToHash(a[:]) }
 
 // Hex returns an EIP55-compliant hex string representation of the address.
 func (a Address) Hex() string {
+	//if value, ok := addressHexCache.Get(a); ok {
+	value, err := addressHexCache.Get(a)
+	if err == nil {
+		recordCacheHit()
+		return value.(string)
+	}
+
+	// Not in cache, compute and store
+	recordCacheMiss()
+	//addressHexCache.Add(a, hex)
+	hex := AddressToHex(a)
+	addressHexCache.Set(a, hex)
+	return hex
+}
+
+func AddressToHex(a Address) string {
 	unchecksummed := hex.EncodeToString(a[:])
 	sha := sha3.NewKeccak256()
 	sha.Write([]byte(unchecksummed))
@@ -489,4 +524,12 @@ func (ct ConnType) Valid() bool {
 func (ct ConnType) String() string {
 	s := fmt.Sprintf("%d", int(ct))
 	return s
+}
+
+// getAddressHexCacheInfo returns cache size and current length
+func getAddressHexCacheInfo() (size int, len int) {
+	if addressHexCache == nil {
+		return 0, 0
+	}
+	return AddressHexCacheSize, addressHexCache.Len(false)
 }
