@@ -71,6 +71,7 @@ require (
 )
 
 require (
+	github.com/bluele/gcache v0.0.2
 	github.com/btcsuite/btcd/btcec/v2 v2.3.4
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/dop251/goja v0.0.0-20231014103939-873a1496dc8e

@@ -24,8 +24,36 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bluele/gcache"
 	"github.com/kaiachain/kaia/common"
 )
+
+var (
+	addressHexCacheSize = 1000
+	addressHexCache     gcache.Cache
+	addresses           map[common.Address]interface{}
+)
+
+func init() {
+	addressHexCache = gcache.New(addressHexCacheSize).
+		LFU().
+		Build()
+	addresses = make(map[common.Address]interface{})
+}
+
+func getAddressHex(addr common.Address) string {
+	addresses[addr] = nil
+	for k, _ := range addresses {
+		fmt.Printf("####### %s\n", k.String())
+	}
+	value, err := addressHexCache.Get(addr)
+	if err == nil {
+		return value.(string)
+	}
+	hex := addr.String()
+	addressHexCache.Set(addr, hex)
+	return hex
+}
 
 type sortableAddressList []common.Address
 
@@ -36,7 +64,7 @@ func (sa sortableAddressList) Len() int {
 func (sa sortableAddressList) Less(i, j int) bool {
 	// Sort by the EIP-155 mixed-case checksummed representation. It differs from the lower-case sorted order.
 	// This order is somewhat counterintuitive, but keeping it for backward compatibility.
-	return strings.Compare(sa[i].String(), sa[j].String()) < 0
+	return strings.Compare(getAddressHex(sa[i]), getAddressHex(sa[j])) < 0
 }
 
 func (sa sortableAddressList) Swap(i, j int) {
