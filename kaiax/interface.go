@@ -88,6 +88,8 @@ type BlockStateModuleHost interface {
 // e.g. PostInsertBlock() may record the governance change.
 type ExecutionModule interface {
 	// Additional actions to perform after inserting a block.
+	// Implementations must be independent from other ExecutionModules: callers
+	// may fan them out concurrently and must not rely on cross-module ordering.
 	PostInsertBlock(block *types.Block) error
 }
 

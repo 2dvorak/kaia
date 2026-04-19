@@ -47,6 +47,7 @@ import (
 	"github.com/kaiachain/kaia/storage/database"
 	"github.com/kaiachain/kaia/work/builder"
 	"github.com/rcrowley/go-metrics"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -576,12 +577,20 @@ func (self *worker) handleFinalizedBlock(result *consensus.ExecutionResult) {
 		events = append(events, blockchain.ChainHeadEvent{Block: block})
 	}
 
-	// Invoke ExecutionModules after executing a block
+	// Invoke ExecutionModules after executing a block.
+	// Modules are contractually independent; run concurrently to reduce
+	// hot-path latency while still preserving per-module error logs.
+	var eg errgroup.Group
 	for _, module := range self.executionModules {
-		if err := module.PostInsertBlock(block); err != nil {
-			logger.Error("Failed to call PostInsertBlock", "err", err)
-		}
+		eg.Go(func() error {
+			if err := module.PostInsertBlock(block); err != nil {
+				logger.Error("PostInsertBlock failed", "module", fmt.Sprintf("%T", module), "err", err)
+				return err
+			}
+			return nil
+		})
 	}
+	_ = eg.Wait()
 
 	logger.Info("Successfully wrote mined block", "num", block.NumberU64(),
 		"hash", block.Hash(), "txs", len(block.Transactions()), "elapsed", blockWriteTime)
