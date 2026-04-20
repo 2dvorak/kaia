@@ -181,6 +181,20 @@ func (mr *MockTxPoolMockRecorder) Pending() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Pending", reflect.TypeOf((*MockTxPool)(nil).Pending))
 }
 
+// PendingSnapshot mocks base method.
+func (m *MockTxPool) PendingSnapshot() map[common.Address]types.Transactions {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PendingSnapshot")
+	ret0, _ := ret[0].(map[common.Address]types.Transactions)
+	return ret0
+}
+
+// PendingSnapshot indicates an expected call of PendingSnapshot.
+func (mr *MockTxPoolMockRecorder) PendingSnapshot() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PendingSnapshot", reflect.TypeOf((*MockTxPool)(nil).PendingSnapshot))
+}
+
 // RegisterTxPoolModule mocks base method.
 func (m *MockTxPool) RegisterTxPoolModule(arg0 ...kaiax.TxPoolModule) {
 	m.ctrl.T.Helper()

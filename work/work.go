@@ -62,6 +62,10 @@ type TxPool interface {
 	// block building should prefer PendingSnapshot to avoid txpool lock traffic.
 	Pending() (map[common.Address]types.Transactions, error)
 
+	// PendingSnapshot returns a lock-free pending snapshot (shallow-copied
+	// outer map). Per-account slices are read-only. Bounded staleness.
+	PendingSnapshot() map[common.Address]types.Transactions
+
 	CachedPendingTxsByCount(count int) types.Transactions
 
 	// SubscribeNewTxsEvent should return an event subscription of

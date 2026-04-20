@@ -30,6 +30,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kaiachain/kaia/blockchain/state"
@@ -265,6 +266,18 @@ type TxPool struct {
 	govModule GovModule
 
 	modules []kaiax.TxPoolModule
+
+	// pendingSnapshot is a lock-free, read-only view of `pending` published
+	// via atomic pointer swap by writers. Consumers (miner, speculative exec)
+	// read it without acquiring pool.mu. Staleness ≤ one writer batch.
+	pendingSnapshot atomic.Pointer[pendingSnapshot]
+}
+
+// pendingSnapshot is the immutable payload atomically swapped into
+// TxPool.pendingSnapshot. The per-account slices are full copies owned by the
+// snapshot, so later pool mutations cannot corrupt them.
+type pendingSnapshot struct {
+	byAddr map[common.Address]types.Transactions
 }
 
 // NewTxPool creates a new transaction pool to gather, sort and filter inbound
@@ -411,6 +424,7 @@ func (pool *TxPool) loop() {
 					delete(pool.beats, addr)
 				}
 			}
+			pool.publishPendingSnapshotLocked()
 			pool.mu.Unlock()
 
 		// Handle local transaction journal rotation
@@ -438,6 +452,8 @@ func (pool *TxPool) lockedReset(oldHead, newHead *types.Header) {
 // reset retrieves the current state of the blockchain and ensures the content
 // of the transaction pool is valid with regard to the chain state.
 func (pool *TxPool) reset(oldHead, newHead *types.Header) {
+	defer pool.publishPendingSnapshotLocked()
+
 	pool.txMu.Lock()
 	var drops []common.Hash
 	for _, module := range pool.modules {
@@ -694,7 +710,8 @@ func (pool *TxPool) Content() (map[common.Address]types.Transactions, map[common
 
 // Pending retrieves all currently processable transactions, groupped by origin
 // account and sorted by nonce. The returned transaction set is a copy and can be
-// freely modified by calling code.
+// freely modified by calling code. Hot paths such as miner/speculative-exec
+// should prefer PendingSnapshot to avoid pool locks.
 func (pool *TxPool) Pending() (map[common.Address]types.Transactions, error) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
@@ -711,6 +728,39 @@ func (pool *TxPool) pendingUnlocked() (map[common.Address]types.Transactions, er
 		pending[addr] = list.Flatten()
 	}
 	return pending, nil
+}
+
+// publishPendingSnapshotLocked rebuilds and atomic-swaps the pending snapshot.
+// Must be invoked while pool.mu is held write-exclusive (or during init before
+// goroutines start). Consumers read via PendingSnapshot without any lock.
+// This intentionally pays the rebuild cost on the writer side to keep miner
+// reads lock-free; revisit with incremental publication if writer pressure
+// becomes material.
+func (pool *TxPool) publishPendingSnapshotLocked() {
+	snap := &pendingSnapshot{
+		byAddr: make(map[common.Address]types.Transactions, len(pool.pending)),
+	}
+	for addr, list := range pool.pending {
+		snap.byAddr[addr] = list.Flatten()
+	}
+	pool.pendingSnapshot.Store(snap)
+}
+
+// PendingSnapshot returns a lock-free snapshot of pending transactions,
+// shallow-copied into a fresh outer map so downstream consumers that mutate
+// it in place (FilterTransactionWithBaseFee, builder.FilterTxs,
+// NewTransactionsByPriceAndNonce) remain safe. Per-account slices are owned
+// by the snapshot and must be treated as read-only by callers.
+func (pool *TxPool) PendingSnapshot() map[common.Address]types.Transactions {
+	snap := pool.pendingSnapshot.Load()
+	if snap == nil {
+		return map[common.Address]types.Transactions{}
+	}
+	clone := make(map[common.Address]types.Transactions, len(snap.byAddr))
+	for addr, txs := range snap.byAddr {
+		clone[addr] = txs
+	}
+	return clone
 }
 
 // queueUnlocked must be protected by pool.mu AND pool.txMu by the caller.
@@ -1525,6 +1575,7 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
+	defer pool.publishPendingSnapshotLocked()
 
 	// Try to inject the transaction and update any state
 	replace, err := pool.add(tx, local)
@@ -1546,7 +1597,9 @@ func (pool *TxPool) addTxs(txs []*types.Transaction, local bool) []error {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
-	return pool.addTxsLocked(txs, local)
+	errs := pool.addTxsLocked(txs, local)
+	pool.publishPendingSnapshotLocked()
+	return errs
 }
 
 // addTxsLocked attempts to queue a batch of transactions if they are valid,
@@ -2284,4 +2337,5 @@ func (pool *TxPool) Clear() {
 	pool.pending = make(map[common.Address]*txList)
 	pool.queue = make(map[common.Address]*txList)
 	pool.pendingNonce = make(map[common.Address]uint64)
+	pool.publishPendingSnapshotLocked()
 }

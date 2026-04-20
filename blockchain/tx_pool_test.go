@@ -56,11 +56,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	// testTxPoolConfig is a transaction pool configuration without stateful disk
-	// sideeffects used during testing.
-	testTxPoolConfig TxPoolConfig
-)
+// testTxPoolConfig is a transaction pool configuration without stateful disk
+// sideeffects used during testing.
+var testTxPoolConfig TxPoolConfig
 
 type dummyGovModule struct {
 	chainConfig *params.ChainConfig
@@ -4348,5 +4346,143 @@ func TestTxPool_saveAndPruneBlobStorage(t *testing.T) {
 			}
 			tc.verify(t, pool, block)
 		})
+	}
+}
+
+// TestPendingSnapshotConsistency verifies that PendingSnapshot() stays in
+// sync with Pending() across every mutation path that is expected to publish
+// the snapshot. A missed publish site would surface here as a divergence.
+func TestPendingSnapshotConsistency(t *testing.T) {
+	pool, key := setupTxPool()
+	defer pool.Stop()
+
+	// Seed a handful of extra accounts so pending has structure.
+	aux := make([]*ecdsa.PrivateKey, 4)
+	for i := range aux {
+		k, _ := crypto.GenerateKey()
+		aux[i] = k
+		pool.currentState.AddBalance(crypto.PubkeyToAddress(k.PublicKey), new(big.Int).SetUint64(params.KAIA))
+	}
+
+	assertSnapshotMatchesPending := func(t *testing.T, label string) {
+		t.Helper()
+		ref, err := pool.Pending()
+		if err != nil {
+			t.Fatalf("%s: Pending() error: %v", label, err)
+		}
+		snap := pool.PendingSnapshot()
+		if len(snap) != len(ref) {
+			t.Fatalf("%s: snapshot size %d != pending size %d", label, len(snap), len(ref))
+		}
+		for addr, refTxs := range ref {
+			snapTxs, ok := snap[addr]
+			if !ok {
+				t.Fatalf("%s: address %x missing from snapshot", label, addr)
+			}
+			if len(snapTxs) != len(refTxs) {
+				t.Fatalf("%s: %x: snapshot len %d != pending len %d", label, addr, len(snapTxs), len(refTxs))
+			}
+			for i, tx := range refTxs {
+				if tx.Hash() != snapTxs[i].Hash() {
+					t.Fatalf("%s: %x[%d]: snapshot hash %s != pending hash %s",
+						label, addr, i, snapTxs[i].Hash().Hex(), tx.Hash().Hex())
+				}
+			}
+		}
+	}
+
+	assertSnapshotMatchesPending(t, "empty pool")
+
+	// Path 1: addTx (single). AddLocal routes through addTx.
+	if err := pool.AddLocal(transaction(0, 100000, key)); err != nil {
+		t.Fatalf("AddLocal: %v", err)
+	}
+	assertSnapshotMatchesPending(t, "after addTx")
+
+	// Path 2: addTxs (batch). AddRemotes routes through addTxs.
+	batch := make([]*types.Transaction, 0, len(aux)*2)
+	for _, k := range aux {
+		batch = append(batch, transaction(0, 100000, k))
+		batch = append(batch, transaction(1, 100000, k))
+	}
+	if errs := pool.AddRemotes(batch); len(errs) > 0 {
+		for _, e := range errs {
+			if e != nil {
+				t.Fatalf("AddRemotes: %v", e)
+			}
+		}
+	}
+	assertSnapshotMatchesPending(t, "after addTxs batch")
+
+	// Path 3: reset via head change. setNewHead + lockedReset drives reset().
+	assertSnapshotMatchesPending(t, "before reset")
+	pool.lockedReset(nil, nil)
+	assertSnapshotMatchesPending(t, "after reset")
+
+	// Path 4: Clear.
+	pool.Clear()
+	assertSnapshotMatchesPending(t, "after Clear")
+
+	// Snapshot mutation by consumer must not corrupt subsequent reads.
+	// (Outer map is freshly cloned each call; per-account slices are shared
+	// but read-only — simulate a consumer that mutates the map entry.)
+	if err := pool.AddLocal(transaction(0, 100000, key)); err != nil {
+		t.Fatalf("AddLocal post-Clear: %v", err)
+	}
+	consumer := pool.PendingSnapshot()
+	for k := range consumer {
+		delete(consumer, k) // mutate outer map
+	}
+	assertSnapshotMatchesPending(t, "after consumer mutation")
+}
+
+type dropOnResetModule struct {
+	drop []common.Hash
+}
+
+func (m *dropOnResetModule) PreAddTx(tx *types.Transaction, local bool) error { return nil }
+func (m *dropOnResetModule) IsModuleTx(tx *types.Transaction) bool            { return false }
+func (m *dropOnResetModule) GetCheckBalance() func(tx *types.Transaction) error {
+	return nil
+}
+
+func (m *dropOnResetModule) IsReady(txs map[uint64]*types.Transaction, next uint64, ready types.Transactions) bool {
+	return true
+}
+
+func (m *dropOnResetModule) PreReset(oldHead, newHead *types.Header) []common.Hash {
+	return m.drop
+}
+
+func (m *dropOnResetModule) PostReset(oldHead, newHead *types.Header, queue, pending map[common.Address]types.Transactions) {
+}
+
+func TestPendingSnapshotPublishedOnEarlyResetReturn(t *testing.T) {
+	pool, key := setupTxPool()
+	defer pool.Stop()
+
+	tx := transaction(0, 100000, key)
+	if err := pool.AddLocal(tx); err != nil {
+		t.Fatalf("AddLocal: %v", err)
+	}
+
+	pool.RegisterTxPoolModule(&dropOnResetModule{drop: []common.Hash{tx.Hash()}})
+
+	oldHead := &types.Header{Number: big.NewInt(2), ParentHash: common.HexToHash("0x1")}
+	newHead := &types.Header{Number: big.NewInt(3), ParentHash: common.HexToHash("0x2")}
+
+	pool.lockedReset(oldHead, newHead)
+
+	pending, err := pool.Pending()
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("expected pending to be empty after dropped tx, got %d accounts", len(pending))
+	}
+
+	snap := pool.PendingSnapshot()
+	if len(snap) != 0 {
+		t.Fatalf("expected snapshot to be empty after early reset return, got %d accounts", len(snap))
 	}
 }
