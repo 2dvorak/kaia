@@ -90,9 +90,10 @@ type stateObject struct {
 	storageTrie Trie // storage trie, which becomes non-nil on first access
 	code        Code // contract bytecode, which gets set when code is loaded
 
-	originStorage Storage // Storage cache of original entries to dedup rewrites
-	dirtyStorage  Storage // Storage entries that need to be flushed to disk
-	fakeStorage   Storage // Fake storage which constructed by caller for debugging purpose.
+	originStorage  Storage // Pre-block committed values (for trie-write skip check).
+	pendingStorage Storage // Post-previous-tx values (EIP-2200 "original" source).
+	dirtyStorage   Storage // Current-tx in-flight writes.
+	fakeStorage    Storage // Fake storage which constructed by caller for debugging purpose.
 
 	// Cache flags.
 	// When an object is marked self-destructed it will be delete from the trie
@@ -129,12 +130,13 @@ func (s *stateObject) empty() bool {
 // newObject creates a state object.
 func newObject(db *StateDB, address common.Address, data account.Account) *stateObject {
 	return &stateObject{
-		db:            db,
-		address:       address,
-		addrHash:      crypto.Keccak256Hash(address[:]),
-		account:       data,
-		originStorage: make(Storage),
-		dirtyStorage:  make(Storage),
+		db:             db,
+		address:        address,
+		addrHash:       crypto.Keccak256Hash(address[:]),
+		account:        data,
+		originStorage:  make(Storage),
+		pendingStorage: make(Storage),
+		dirtyStorage:   make(Storage),
 	}
 }
 
@@ -191,17 +193,20 @@ func (s *stateObject) getStorageTrie(db Database) Trie {
 // GetState retrieves a value from the account storage trie.
 func (s *stateObject) GetState(db Database, key common.Hash) common.Hash {
 	// If we have a dirty value for this state entry, return it
-	value, dirty := s.dirtyStorage[key]
-	if dirty {
+	if value, dirty := s.dirtyStorage[key]; dirty {
 		return value
 	}
 	// Otherwise return the entry's original value
 	return s.GetCommittedState(db, key)
 }
 
-// GetCommittedState retrieves a value from the committed account storage trie.
+// GetCommittedState returns the value at the start of the current tx per
+// EIP-2200: pendingStorage holds previous-tx writes, originStorage the
+// pre-block committed value.
 func (s *stateObject) GetCommittedState(db Database, key common.Hash) common.Hash {
-	// If we have the original value cached, return that
+	if value, pending := s.pendingStorage[key]; pending {
+		return value
+	}
 	value, cached := s.originStorage[key]
 	if cached {
 		return value
@@ -336,18 +341,31 @@ func (s *stateObject) UpdateKey(newKey accountkey.AccountKey, currentBlockNumber
 	return s.account.UpdateKey(newKey, currentBlockNumber)
 }
 
-// updateStorageTrie writes cached storage modifications into the object's storage trie.
+// finalisePendingStorage moves dirtyStorage into pendingStorage at a tx
+// boundary. The next updateStorageTrie drains pendingStorage into the trie.
+func (s *stateObject) finalisePendingStorage() {
+	for key, value := range s.dirtyStorage {
+		s.pendingStorage[key] = value
+		delete(s.dirtyStorage, key)
+	}
+}
+
+// updateStorageTrie flushes pending + dirty writes to the storage trie.
+// originStorage keeps pre-block values so the no-op skip check stays correct.
 func (s *stateObject) updateStorageTrie(db Database) Trie {
 	// Track the amount of time wasted on updating the storage trie
 	if EnabledExpensive {
 		defer func(start time.Time) { s.db.StorageUpdates += time.Since(start) }(time.Now())
 	}
+	// Merge residual dirty writes so we iterate pending exactly once below.
+	s.finalisePendingStorage()
+
 	// The snapshot storage map for the object
 	var storage map[common.Hash][]byte
 	// Insert all the pending updates into the trie
 	tr := s.getStorageTrie(db)
-	for key, value := range s.dirtyStorage {
-		delete(s.dirtyStorage, key)
+	for key, value := range s.pendingStorage {
+		delete(s.pendingStorage, key)
 
 		// Skip noop changes, persist actual changes
 		if value == s.originStorage[key] {
@@ -473,6 +491,7 @@ func (s *stateObject) deepCopy(db *StateDB) *stateObject {
 	}
 	stateObject.code = s.code
 	stateObject.dirtyStorage = s.dirtyStorage.Copy()
+	stateObject.pendingStorage = s.pendingStorage.Copy()
 	stateObject.originStorage = s.originStorage.Copy()
 	stateObject.selfDestructed = s.selfDestructed
 	stateObject.dirtyCode = s.dirtyCode

@@ -414,6 +414,26 @@ func (tx *Transaction) WithoutBlobTxSidecar() *Transaction {
 	return cpy
 }
 
+// CachedFrom returns the opaque sender cache (sigCache or sigCachePubkey) or
+// nil. Used to transplant a recovered sender between tx objects with the
+// same hash; downstream Sender* falls back to ecrecover on signer mismatch.
+func (tx *Transaction) CachedFrom() any { return tx.from.Load() }
+
+func (tx *Transaction) StoreFromCache(v any) {
+	if v != nil {
+		tx.from.Store(v)
+	}
+}
+
+// CachedFeePayer / StoreFeePayerCache mirror the above for the fee-payer slot.
+func (tx *Transaction) CachedFeePayer() any { return tx.feePayer.Load() }
+
+func (tx *Transaction) StoreFeePayerCache(v any) {
+	if v != nil {
+		tx.feePayer.Store(v)
+	}
+}
+
 // WithBlobTxSidecar returns a copy of tx with the blob sidecar added.
 func (tx *Transaction) WithBlobTxSidecar(sideCar *BlobTxSidecar) *Transaction {
 	blobtx, ok := tx.GetTxInternalData().(*TxInternalDataEthereumBlob)

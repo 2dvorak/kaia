@@ -40,6 +40,7 @@ import (
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/params"
+	"github.com/kaiachain/kaia/snapshot"
 	"github.com/kaiachain/kaia/storage/database"
 	"github.com/kaiachain/kaia/storage/statedb"
 	"github.com/stretchr/testify/assert"
@@ -871,3 +872,157 @@ func TestStateDBTransientStorage(t *testing.T) {
 		t.Fatalf("transient storage mismatch: have %x, want %x", got, value)
 	}
 }
+
+// TestFinaliseForValidationOriginStorageUpdated guards the EIP-2200/2929/3529
+// invariant: GetCommittedState at tx boundary returns the previous tx's
+// write, not the pre-block value. End-of-block roots must match across modes.
+func TestFinaliseForValidationOriginStorageUpdated(t *testing.T) {
+	addr := common.BytesToAddress([]byte{0xc0, 0xde})
+	slot := common.Hash{0x01}
+	v0 := common.BytesToHash([]byte{0x05}) // "pre-block committed" value
+	v1 := common.BytesToHash([]byte{0x0a}) // tx1 writes
+	v2 := common.BytesToHash([]byte{0x14}) // tx2 writes
+
+	run := func(validation bool) (afterTx1, afterTx2 common.Hash) {
+		s, _ := New(common.Hash{}, NewDatabase(database.NewMemoryDBManager()), nil, nil)
+		s.CreateSmartContractAccount(addr, params.CodeFormatEVM, params.Rules{IsIstanbul: true})
+		// Keep the account non-empty so EIP-158's empty-sweep (deleteEmptyObjects=true)
+		// doesn't garbage-collect it during Finalise.
+		s.AddBalance(addr, big.NewInt(1))
+
+		// Prime originStorage as if loaded from the parent-block trie.
+		so := s.getStateObject(addr)
+		so.originStorage[slot] = v0
+
+		if validation {
+			s.SetValidationMode(true)
+		}
+		s.SetState(addr, slot, v1)
+		if validation {
+			s.FinaliseForValidation(true)
+		} else {
+			s.Finalise(true, false)
+		}
+		afterTx1 = s.GetCommittedState(addr, slot)
+
+		s.SetState(addr, slot, v2)
+		if validation {
+			s.FinaliseForValidation(true)
+		} else {
+			s.Finalise(true, false)
+		}
+		afterTx2 = s.GetCommittedState(addr, slot)
+		return
+	}
+
+	regAfterTx1, regAfterTx2 := run(false)
+	valAfterTx1, valAfterTx2 := run(true)
+
+	if regAfterTx1 != v1 {
+		t.Fatalf("regular: origin after tx1 = %x, want %x", regAfterTx1, v1)
+	}
+	if valAfterTx1 != v1 {
+		t.Fatalf("validation: origin after tx1 = %x, want %x (EIP-2200 violation)",
+			valAfterTx1, v1)
+	}
+	if regAfterTx2 != v2 {
+		t.Fatalf("regular: origin after tx2 = %x, want %x", regAfterTx2, v2)
+	}
+	if valAfterTx2 != v2 {
+		t.Fatalf("validation: origin after tx2 = %x, want %x (EIP-2200 violation)",
+			valAfterTx2, v2)
+	}
+
+	// End-of-block state roots must agree.
+	endOfBlock := func(validation bool) common.Hash {
+		s, _ := New(common.Hash{}, NewDatabase(database.NewMemoryDBManager()), nil, nil)
+		s.CreateSmartContractAccount(addr, params.CodeFormatEVM, params.Rules{IsIstanbul: true})
+		s.AddBalance(addr, big.NewInt(1))
+		so := s.getStateObject(addr)
+		so.originStorage[slot] = v0
+		if validation {
+			s.SetValidationMode(true)
+		}
+		s.SetState(addr, slot, v1)
+		if validation {
+			s.FinaliseForValidation(true)
+		} else {
+			s.Finalise(true, false)
+		}
+		s.SetState(addr, slot, v2)
+		if validation {
+			s.FinaliseForValidation(true)
+		} else {
+			s.Finalise(true, false)
+		}
+		if validation {
+			s.PrepareValidationFinalise()
+		}
+		return s.IntermediateRoot(true)
+	}
+	regRoot := endOfBlock(false)
+	valRoot := endOfBlock(true)
+	if regRoot != valRoot {
+		t.Fatalf("state root mismatch: regular=%x validation=%x", regRoot, valRoot)
+	}
+}
+
+// TestCopyPreservesValidationMode: Copy must carry validationMode so forks
+// during Process don't silently downgrade to regular Finalise semantics.
+func TestCopyPreservesValidationMode(t *testing.T) {
+	s, _ := New(common.Hash{}, NewDatabase(database.NewMemoryDBManager()), nil, nil)
+	s.SetValidationMode(true)
+	cpy := s.Copy()
+	if !cpy.validationModeEnabled() {
+		t.Fatalf("Copy() lost validationMode flag")
+	}
+}
+
+func (s *StateDB) validationModeEnabled() bool { return s.validationMode }
+
+// TestFinaliseForValidationSnapDestruct: selfdestruct under validation mode
+// must populate snapDestructs / clear snapAccounts at the tx boundary.
+func TestFinaliseForValidationSnapDestruct(t *testing.T) {
+	addr := common.BytesToAddress([]byte{0xde, 0xad})
+
+	s, _ := New(common.Hash{}, NewDatabase(database.NewMemoryDBManager()), nil, nil)
+	s.snap = fakeSnap{}
+	s.snapDestructs = make(map[common.Hash]struct{})
+	s.snapAccounts = make(map[common.Hash][]byte)
+	s.snapStorage = make(map[common.Hash]map[common.Hash][]byte)
+
+	s.CreateSmartContractAccount(addr, params.CodeFormatEVM, params.Rules{IsIstanbul: true})
+	s.AddBalance(addr, big.NewInt(1)) // keep non-empty so selfdestruct is the trigger
+	so := s.getStateObject(addr)
+	if so == nil {
+		t.Fatalf("state object missing")
+	}
+	addrHash := so.addrHash
+
+	s.snapAccounts[addrHash] = []byte{0xff}
+	s.snapStorage[addrHash] = map[common.Hash][]byte{{0x01}: {0x02}}
+
+	s.SetValidationMode(true)
+	s.SelfDestruct(addr)
+	s.FinaliseForValidation(true)
+
+	if _, ok := s.snapDestructs[addrHash]; !ok {
+		t.Fatalf("snapDestructs tombstone missing after selfdestruct")
+	}
+	if _, ok := s.snapAccounts[addrHash]; ok {
+		t.Fatalf("snapAccounts still present after selfdestruct")
+	}
+	if _, ok := s.snapStorage[addrHash]; ok {
+		t.Fatalf("snapStorage still present after selfdestruct")
+	}
+}
+
+// fakeSnap is a non-nil stand-in used only to flip the `s.snap != nil` branch.
+type fakeSnap struct{}
+
+var _ snapshot.Snapshot = fakeSnap{}
+
+func (fakeSnap) Root() common.Hash                                { return common.Hash{} }
+func (fakeSnap) Account(common.Hash) (account.Account, error)     { return nil, nil }
+func (fakeSnap) AccountRLP(common.Hash) ([]byte, error)           { return nil, nil }
+func (fakeSnap) Storage(common.Hash, common.Hash) ([]byte, error) { return nil, nil }

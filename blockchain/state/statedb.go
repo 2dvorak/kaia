@@ -112,6 +112,10 @@ type StateDB struct {
 
 	prefetching bool
 
+	// validationMode defers per-tx trie mutations to end-of-block IntermediateRoot.
+	// Only safe on the block-validation path, which never issues between-tx RevertToSnapshot.
+	validationMode bool
+
 	// Measurements gathered during execution for debugging purposes
 	AccountReads         time.Duration
 	AccountHashes        time.Duration
@@ -951,6 +955,7 @@ func copyStateDB(dst, src *StateDB) {
 	dst.db = src.db
 	dst.trie = src.db.CopyTrie(src.trie)
 	dst.trieOpts = src.trieOpts
+	dst.validationMode = src.validationMode
 
 	dst.stateObjects = make(map[common.Address]*stateObject, len(src.stateObjects))
 	dst.stateObjectsDirty = make(map[common.Address]struct{}, len(src.stateObjectsDirty))
@@ -1142,6 +1147,56 @@ func (s *StateDB) clearJournalAndRefund() {
 	s.journal = newJournal()
 	s.validRevisions = s.validRevisions[:0]
 	s.refund = 0
+}
+
+// SetValidationMode toggles validation-path tx finalisation; enable only on
+// statedbs used by StateProcessor.Process, never on the miner path.
+func (s *StateDB) SetValidationMode(on bool) { s.validationMode = on }
+
+// FinaliseTx applies the normal per-tx Finalise path, or the validation-mode
+// variant when StateProcessor has explicitly enabled deferred trie updates.
+func (s *StateDB) FinaliseTx(deleteEmptyObjects bool) {
+	if s.validationMode {
+		s.FinaliseForValidation(deleteEmptyObjects)
+		return
+	}
+	s.Finalise(deleteEmptyObjects, false)
+}
+
+// FinaliseForValidation does the minimal per-tx bookkeeping and defers trie
+// mutations to end-of-block IntermediateRoot. Safe only because Process
+// never issues between-tx RevertToSnapshot.
+func (s *StateDB) FinaliseForValidation(deleteEmptyObjects bool) {
+	for addr := range s.journal.dirties {
+		so, exist := s.stateObjects[addr]
+		if !exist {
+			continue
+		}
+		if so.selfDestructed || (deleteEmptyObjects && so.empty()) {
+			so.deleted = true
+			if s.snap != nil {
+				s.snapDestructs[so.addrHash] = struct{}{}
+				delete(s.snapAccounts, so.addrHash)
+				delete(s.snapStorage, so.addrHash)
+			}
+		} else {
+			// Move this tx's writes to pendingStorage so the next tx's
+			// GetCommittedState sees post-this-tx values (EIP-2200 "original").
+			so.finalisePendingStorage()
+		}
+		so.created = false
+		s.stateObjectsDirty[addr] = struct{}{}
+	}
+	s.clearJournalAndRefund()
+}
+
+// PrepareValidationFinalise re-injects stateObjectsDirty into journal.dirties
+// so end-of-block Finalise iterates the full block-level dirty set. Call once
+// after the tx loop, before FinalizeState.
+func (s *StateDB) PrepareValidationFinalise() {
+	for addr := range s.stateObjectsDirty {
+		s.journal.dirty(addr)
+	}
 }
 
 // Commit writes the state to the underlying in-memory trie database.

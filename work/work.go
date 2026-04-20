@@ -58,7 +58,8 @@ type TxPool interface {
 	HandleTxMsg(types.Transactions)
 
 	// Pending should return pending transactions.
-	// The slice should be modifiable by the caller.
+	// The slice should be modifiable by the caller. Hot paths such as miner
+	// block building should prefer PendingSnapshot to avoid txpool lock traffic.
 	Pending() (map[common.Address]types.Transactions, error)
 
 	CachedPendingTxsByCount(count int) types.Transactions
@@ -166,7 +167,7 @@ func (self *Miner) Start() {
 		logger.Info("Starting mining operation")
 	}
 	self.worker.start()
-	// commitNewWork() is triggered by NewSequenceEvent from startNewRound()
+	// New work is triggered by NewSequenceEvent from startNewRound().
 }
 
 func (self *Miner) Stop() {
@@ -289,6 +290,7 @@ type BlockChain interface {
 	ResetWithGenesisBlock(gb *types.Block) error
 	Validator() blockchain.Validator
 	HasBadBlock(hash common.Hash) bool
+	TxLookup() func(common.Hash) *types.Transaction
 	WriteBlockWithState(block *types.Block, receipts []*types.Receipt, stateDB *state.StateDB) (blockchain.WriteResult, error)
 	PostChainEvents(events []interface{}, logs []*types.Log)
 	ApplyTransaction(config *params.ChainConfig, author *common.Address, statedb *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg *vm.Config) (*types.Receipt, *vm.InternalTxTrace, error)

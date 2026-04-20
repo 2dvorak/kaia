@@ -77,6 +77,10 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 
 	p.InitializeState(header, statedb)
 
+	// Validator path: defer per-tx trie mutations to end-of-block IntermediateRoot.
+	statedb.SetValidationMode(true)
+	defer statedb.SetValidationMode(false)
+
 	// Extract author from the header
 	author, _ := p.bc.sealer.Author(header) // Ignore error, we're past header validation
 
@@ -93,6 +97,10 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		internalTxTraces = append(internalTxTraces, internalTxTrace)
 	}
 	processStats.AfterApplyTxs = time.Now()
+
+	// Re-inject accumulated dirty set so end-of-block Finalise iterates the
+	// full union; per-tx FinaliseForValidation cleared journal.dirties.
+	statedb.PrepareValidationFinalise()
 
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
 	if _, err := p.FinalizeState(header, statedb, block.Transactions(), receipts); err != nil {

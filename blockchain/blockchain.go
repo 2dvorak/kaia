@@ -202,6 +202,7 @@ type BlockChain struct {
 	validator  Validator  // block and state validator interface
 	vmConfig   vm.Config
 	specCache  *SpeculativeResultCache // single-entry cache for speculative execution results
+	txLookup   atomic.Pointer[chainTxLookup]
 
 	parallelDBWrite bool // TODO-Kaia-Storage parallelDBWrite will be replaced by number of goroutines when worker pool pattern is introduced.
 
@@ -2898,8 +2899,8 @@ func (bc *BlockChain) ApplyTransaction(chainConfig *params.ChainConfig, author *
 			logger.Error("failed to get tracing result from a transaction", "txHash", tx.Hash().String(), "err", err)
 		}
 	}
-	// Update the state with pending changes
-	statedb.Finalise(true, false)
+	// Update the state with pending changes.
+	statedb.FinaliseTx(true)
 	*usedGas += result.UsedGas
 
 	receipt := types.NewReceipt(result.VmExecutionStatus, tx.Hash(), result.UsedGas)
