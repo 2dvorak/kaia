@@ -1553,14 +1553,20 @@ func (pm *ProtocolManager) BroadcastBid(bid *auction.Bid) {
 // BroadcastTxs propagates a batch of transactions to its peers which are not known to
 // already have the given transaction.
 func (pm *ProtocolManager) BroadcastTxs(txs types.Transactions) {
-	// This function calls sendTransaction() to broadcast the transactions for each peer.
-	// In that case, transactions are sorted for each peer in sendTransaction().
-	// Therefore, it prevents sorting transactions by each peer.
+	totalStart := time.Now()
+	defer func() { broadcastTxsTotalTimer.Update(time.Since(totalStart)) }()
+	broadcastTxsBatchGauge.Update(int64(len(txs)))
+
+	// Sort transactions by effective gas tip (descending) for fair propagation.
+	// Higher-fee txs propagate first, ensuring fair inclusion under txpool pressure.
 	baseFee := big.NewInt(int64(params.DefaultLowerBoundBaseFee))
 	if pm.blockchain != nil && pm.blockchain.CurrentHeader() != nil && pm.blockchain.CurrentHeader().BaseFee != nil {
 		baseFee = pm.blockchain.CurrentHeader().BaseFee
 	}
+	sortStart := time.Now()
 	txs = types.SortTxsByPriceAndTime(txs, baseFee)
+	broadcastTxsSortTimer.Update(time.Since(sortStart))
+
 	switch pm.nodetype {
 	case common.CONSENSUSNODE:
 		pm.broadcastTxsFromCN(txs)
@@ -1574,6 +1580,7 @@ func (pm *ProtocolManager) BroadcastTxs(txs types.Transactions) {
 }
 
 func (pm *ProtocolManager) broadcastTxsFromCN(txs types.Transactions) {
+	peerFindStart := time.Now()
 	cnPeersWithoutTxs := make(map[Peer]types.Transactions)
 	for _, tx := range txs {
 		peers := pm.peers.CNWithoutTx(tx.Hash())
@@ -1591,16 +1598,20 @@ func (pm *ProtocolManager) broadcastTxsFromCN(txs types.Transactions) {
 		}
 		logger.Trace("Broadcast transaction", "hash", tx.Hash(), "recipients", len(peers))
 	}
+	broadcastTxsPeerFindTimer.Update(time.Since(peerFindStart))
 
 	propTxPeersGauge.Update(int64(len(cnPeersWithoutTxs)))
 	// FIXME include this again: peers = peers[:int(math.Sqrt(float64(len(peers))))]
+	sendStart := time.Now()
 	for peer, txs2 := range cnPeersWithoutTxs {
 		// peer.SendTransactions(txs)
 		peer.AsyncSendTransactions(txs2)
 	}
+	broadcastTxsSendTimer.Update(time.Since(sendStart))
 }
 
 func (pm *ProtocolManager) broadcastTxsFromPN(txs types.Transactions) {
+	peerFindStart := time.Now()
 	cnPeersWithoutTxs := make(map[Peer]types.Transactions)
 	peersWithoutTxs := make(map[Peer]types.Transactions)
 	for _, tx := range txs {
@@ -1616,23 +1627,32 @@ func (pm *ProtocolManager) broadcastTxsFromPN(txs types.Transactions) {
 		pm.peers.UpdateTypePeersWithoutTxs(tx, common.PROXYNODE, peersWithoutTxs)
 		txSendCounter.Inc(1)
 	}
+	broadcastTxsPeerFindTimer.Update(time.Since(peerFindStart))
 
 	propTxPeersGauge.Update(int64(len(peersWithoutTxs) + len(cnPeersWithoutTxs)))
-	sendTransactions(cnPeersWithoutTxs)
-	sendTransactions(peersWithoutTxs)
+	sendStart := time.Now()
+	asyncSendTransactions(cnPeersWithoutTxs)
+	asyncSendTransactions(peersWithoutTxs)
+	broadcastTxsSendTimer.Update(time.Since(sendStart))
 }
 
 func (pm *ProtocolManager) broadcastTxsFromEN(txs types.Transactions) {
-	peersWithoutTxs := make(map[Peer]types.Transactions)
-	for _, tx := range txs {
-		pm.peers.UpdateTypePeersWithoutTxs(tx, common.CONSENSUSNODE, peersWithoutTxs)
-		pm.peers.UpdateTypePeersWithoutTxs(tx, common.PROXYNODE, peersWithoutTxs)
-		pm.peers.UpdateTypePeersWithoutTxs(tx, common.ENDPOINTNODE, peersWithoutTxs)
+	peerFindStart := time.Now()
+	// Single lock acquisition + pre-filtered peer list for the whole batch.
+	peersWithoutTxs := pm.peers.BatchTypePeersWithoutTxs(txs,
+		common.CONSENSUSNODE, common.PROXYNODE, common.ENDPOINTNODE)
+	if peersWithoutTxs == nil {
+		peersWithoutTxs = make(map[Peer]types.Transactions)
+	}
+	for range txs {
 		txSendCounter.Inc(1)
 	}
+	broadcastTxsPeerFindTimer.Update(time.Since(peerFindStart))
 
 	propTxPeersGauge.Update(int64(len(peersWithoutTxs)))
-	sendTransactions(peersWithoutTxs)
+	sendStart := time.Now()
+	asyncSendTransactions(peersWithoutTxs)
+	broadcastTxsSendTimer.Update(time.Since(sendStart))
 }
 
 // ReBroadcastTxs sends transactions, not considering whether the peer has the transaction or not.
@@ -1659,7 +1679,15 @@ func (pm *ProtocolManager) ReBroadcastTxs(txs types.Transactions) {
 	}
 
 	propTxPeersGauge.Update(int64(len(peersWithoutTxs)))
-	sendTransactions(peersWithoutTxs)
+	asyncSendTransactions(peersWithoutTxs)
+}
+
+// asyncSendTransactions delivers txs to each peer via its non-blocking queue,
+// decoupling the broadcast goroutine from per-peer network I/O.
+func asyncSendTransactions(txsSet map[Peer]types.Transactions) {
+	for peer, txs := range txsSet {
+		peer.AsyncSendTransactions(txs)
+	}
 }
 
 // sendTransactions iterates the given map with the key-value pair of Peer and Transactions

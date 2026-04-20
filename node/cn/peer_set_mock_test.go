@@ -107,6 +107,25 @@ func (mr *MockPeerSetMockRecorder) CNWithoutTx(arg0 interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CNWithoutTx", reflect.TypeOf((*MockPeerSet)(nil).CNWithoutTx), arg0)
 }
 
+// BatchTypePeersWithoutTxs mocks base method.
+func (m *MockPeerSet) BatchTypePeersWithoutTxs(txs types.Transactions, nodeTypes ...common.ConnType) map[Peer]types.Transactions {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{txs}
+	for _, a := range nodeTypes {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "BatchTypePeersWithoutTxs", varargs...)
+	ret0, _ := ret[0].(map[Peer]types.Transactions)
+	return ret0
+}
+
+// BatchTypePeersWithoutTxs indicates an expected call of BatchTypePeersWithoutTxs.
+func (mr *MockPeerSetMockRecorder) BatchTypePeersWithoutTxs(txs interface{}, nodeTypes ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]interface{}{txs}, nodeTypes...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BatchTypePeersWithoutTxs", reflect.TypeOf((*MockPeerSet)(nil).BatchTypePeersWithoutTxs), varargs...)
+}
+
 // Close mocks base method.
 func (m *MockPeerSet) Close() {
 	m.ctrl.T.Helper()
