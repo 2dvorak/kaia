@@ -35,7 +35,6 @@ import (
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
-	"github.com/kaiachain/kaia/common/prque"
 	"github.com/kaiachain/kaia/event"
 	"github.com/kaiachain/kaia/kaiax"
 	"github.com/kaiachain/kaia/kaiax/gov"
@@ -119,6 +118,19 @@ var (
 	underpricedTxCounter = metrics.NewRegisteredCounter("txpool/underpriced", nil)
 	refusedTxCounter     = metrics.NewRegisteredCounter("txpool/refuse", nil)
 	slotsGauge           = metrics.NewRegisteredGauge("txpool/slots", nil)
+
+	// Timing metrics for tx submission path
+	addTxsTimer           = metrics.NewRegisteredTimer("txpool/addtxs/time", nil)
+	addTxsLockWaitTimer   = metrics.NewRegisteredTimer("txpool/addtxs/lockwait/time", nil)
+	promoteTimer          = metrics.NewRegisteredTimer("txpool/promote/time", nil)
+	promoteFairShareTimer = metrics.NewRegisteredTimer("txpool/promote/fairshare/time", nil)
+	pricedReheapTimer     = metrics.NewRegisteredTimer("txpool/priced/reheap/time", nil)
+	pricedDiscardTimer    = metrics.NewRegisteredTimer("txpool/priced/discard/time", nil)
+	validateTxTimer       = metrics.NewRegisteredTimer("txpool/validate/time", nil)
+
+	// Batch size gauges
+	addTxsBatchSizeGauge = metrics.NewRegisteredGauge("txpool/addtxs/batchsize", nil)
+	promoteDirtyGauge    = metrics.NewRegisteredGauge("txpool/promote/dirty", nil)
 )
 
 // TxStatus is the current status of a transaction as seen by the pool.
@@ -713,6 +725,38 @@ func (pool *TxPool) pendingUnlocked() (map[common.Address]types.Transactions, er
 	return pending, nil
 }
 
+// PendingWithBaseFee fuses Pending() + FilterTransactionWithBaseFee into a
+// single locked pass. Transactions with GasPrice < baseFee are truncated in
+// place per-account (txs are nonce-sorted, so the first sub-baseFee tx terminates
+// that account's list). Accounts with zero qualifying txs are omitted from the
+// result map entirely. When baseFee is nil, behaves exactly like Pending().
+func (pool *TxPool) PendingWithBaseFee(baseFee *big.Int) (map[common.Address]types.Transactions, error) {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	pool.txMu.Lock()
+	defer pool.txMu.Unlock()
+
+	if baseFee == nil {
+		return pool.pendingUnlocked()
+	}
+
+	pending := make(map[common.Address]types.Transactions, len(pool.pending))
+	for addr, list := range pool.pending {
+		txs := list.Flatten()
+		cutoff := len(txs)
+		for i, tx := range txs {
+			if tx.GasPrice().Cmp(baseFee) < 0 {
+				cutoff = i
+				break
+			}
+		}
+		if cutoff > 0 {
+			pending[addr] = txs[:cutoff]
+		}
+	}
+	return pending, nil
+}
+
 // queueUnlocked must be protected by pool.mu AND pool.txMu by the caller.
 func (pool *TxPool) queueUnlocked() (map[common.Address]types.Transactions, error) {
 	queue := make(map[common.Address]types.Transactions)
@@ -783,6 +827,8 @@ func (pool *TxPool) local() map[common.Address]types.Transactions {
 // validateTx checks whether a transaction is valid according to the consensus
 // rules and adheres to some heuristic limits of the local node (price and size).
 func (pool *TxPool) validateTx(tx *types.Transaction) error {
+	start := time.Now()
+	defer func() { validateTxTimer.Update(time.Since(start)) }()
 	// Accept only legacy transactions until EIP-2718/2930 activates.
 	if !pool.rules.IsEthTxType && tx.IsEthTypedTransaction() {
 		return ErrTxTypeNotSupported
@@ -1541,9 +1587,15 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 
 // addTxs attempts to queue a batch of transactions if they are valid.
 func (pool *TxPool) addTxs(txs []*types.Transaction, local bool) []error {
+	start := time.Now()
+	defer func() { addTxsTimer.Update(time.Since(start)) }()
+	addTxsBatchSizeGauge.Update(int64(len(txs)))
+
 	senderCacher.recover(pool.signer, txs)
 
+	lockStart := time.Now()
 	pool.mu.Lock()
+	addTxsLockWaitTimer.Update(time.Since(lockStart))
 	defer pool.mu.Unlock()
 
 	return pool.addTxsLocked(txs, local)
@@ -1567,6 +1619,7 @@ func (pool *TxPool) addTxsLocked(txs []*types.Transaction, local bool) []error {
 	}
 
 	// Only reprocess the internal state if something was actually added
+	promoteDirtyGauge.Update(int64(len(dirty)))
 	if len(dirty) > 0 {
 		addrs := make([]common.Address, 0, len(dirty))
 		for addr := range dirty {
@@ -1682,6 +1735,8 @@ func (pool *TxPool) removeTx(hash common.Hash, outofbound bool) {
 // future queue to the set of pending transactions. During this process, all
 // invalidated transactions (low nonce, low balance) are deleted.
 func (pool *TxPool) promoteExecutables(accounts []common.Address) {
+	start := time.Now()
+	defer func() { promoteTimer.Update(time.Since(start)) }()
 	pool.txMu.Lock()
 	defer pool.txMu.Unlock()
 	// Track the promoted transactions to broadcast them at once
@@ -1759,66 +1814,75 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 	}
 
 	if pending > pool.config.ExecSlotsAll {
+		fairStart := time.Now()
 		pendingBeforeCap := pending
-		// Assemble a spam order to penalize large transactors first
-		spammers := prque.New()
+
+		// Collect offenders: non-local accounts exceeding per-account limit
+		type offenderInfo struct {
+			addr  common.Address
+			count int
+		}
+		var offenders []offenderInfo
 		for addr, list := range pool.pending {
-			// Only evict transactions from high rollers
 			if !pool.locals.contains(addr) && uint64(list.Len()) > pool.config.ExecSlotsAccount {
-				spammers.Push(addr, int64(list.Len()))
+				offenders = append(offenders, offenderInfo{addr, list.Len()})
 			}
 		}
-		// Gradually drop transactions from offenders
-		offenders := []common.Address{}
-		for pending > pool.config.ExecSlotsAll && !spammers.Empty() {
-			// Retrieve the next offender if not local address
-			offender, _ := spammers.Pop()
-			offenders = append(offenders, offender.(common.Address))
+		// Sort descending by tx count (highest spammers first)
+		sort.Slice(offenders, func(i, j int) bool {
+			return offenders[i].count > offenders[j].count
+		})
 
-			// Equalize balances until all the same or below threshold
-			if len(offenders) > 1 {
-				// Calculate the equalization threshold for all current offenders
-				threshold := pool.pending[offender.(common.Address)].Len()
-
-				// Iteratively reduce all offenders until below limit or threshold reached
-				for pending > pool.config.ExecSlotsAll && pool.pending[offenders[len(offenders)-2]].Len() > threshold {
-					for i := 0; i < len(offenders)-1; i++ {
-						list := pool.pending[offenders[i]]
-						for _, tx := range list.Cap(list.Len() - 1) {
-							// Drop the transaction from the global pools too
-							hash := tx.Hash()
-							pool.all.Remove(hash)
-							pool.priced.Removed()
-
-							// Update the account nonce to the dropped transaction
-							pool.updatePendingNonce(offenders[i], tx.Nonce())
-							logger.Trace("Removed fairness-exceeding pending transaction", "hash", hash)
-						}
-						pending--
-					}
-				}
-			}
+		// Calculate the equalization target in O(n) instead of O(n*excess*n*log*n).
+		// The algorithm equalizes top offenders down to each next level, stopping
+		// when enough txs have been freed to bring pending under ExecSlotsAll.
+		excess := int(pending - pool.config.ExecSlotsAll)
+		target := 0
+		if len(offenders) > 0 {
+			target = offenders[0].count
 		}
-		// If still above threshold, reduce to limit or min allowance
-		if pending > pool.config.ExecSlotsAll && len(offenders) > 0 {
-			for pending > pool.config.ExecSlotsAll && uint64(pool.pending[offenders[len(offenders)-1]].Len()) > pool.config.ExecSlotsAccount {
-				for _, addr := range offenders {
-					list := pool.pending[addr]
-					for _, tx := range list.Cap(list.Len() - 1) {
-						// Drop the transaction from the global pools too
-						hash := tx.Hash()
-						pool.all.Remove(hash)
-						pool.priced.Removed()
-
-						// Update the account nonce to the dropped transaction
-						pool.updatePendingNonce(addr, tx.Nonce())
-						logger.Trace("Removed fairness-exceeding pending transaction", "hash", hash)
-					}
-					pending--
-				}
+		for i := 1; i < len(offenders) && excess > 0; i++ {
+			// Reducing offenders[0..i-1] from target to offenders[i].count
+			reduction := i * (target - offenders[i].count)
+			if reduction >= excess {
+				// Partial reduction: distribute remaining excess across i offenders
+				target = target - (excess+i-1)/i
+				excess = 0
+				break
 			}
+			excess -= reduction
+			target = offenders[i].count
 		}
+		// If still excess after equalizing all, reduce equally
+		if excess > 0 && len(offenders) > 0 {
+			n := len(offenders)
+			target = target - (excess+n-1)/n
+		}
+		// Never reduce below per-account minimum
+		if target < int(pool.config.ExecSlotsAccount) {
+			target = int(pool.config.ExecSlotsAccount)
+		}
+
+		// Apply caps in a single pass — ONE Cap() call per offender
+		var removedCount int
+		for _, off := range offenders {
+			if off.count <= target {
+				continue
+			}
+			list := pool.pending[off.addr]
+			for _, tx := range list.Cap(target) {
+				hash := tx.Hash()
+				pool.all.Remove(hash)
+				pool.updatePendingNonce(off.addr, tx.Nonce())
+				removedCount++
+			}
+			pending -= uint64(off.count - target)
+		}
+		// Batch-update the priced list stale counter (avoids mid-operation reheaps)
+		pool.priced.RemovedBatch(removedCount)
+
 		pendingRateLimitCounter.Inc(int64(pendingBeforeCap - pending))
+		promoteFairShareTimer.Update(time.Since(fairStart))
 	}
 	// If we've queued more transactions than the hard limit, drop oldest ones
 	queued := uint64(0)

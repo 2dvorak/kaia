@@ -96,6 +96,14 @@ var (
 	snapshotAccountReadTimer = metrics.NewRegisteredTimer("miner/snapshot/account/reads", nil)
 	snapshotStorageReadTimer = metrics.NewRegisteredTimer("miner/snapshot/storage/reads", nil)
 	snapshotCommitTimer      = metrics.NewRegisteredTimer("miner/snapshot/commits", nil)
+
+	// Timing metrics for miner preparation path
+	minerPendingTimer        = metrics.NewRegisteredTimer("miner/pending/time", nil)
+	minerFilterBaseFeeTimer  = metrics.NewRegisteredTimer("miner/filter/basefee/time", nil)
+	minerTxSortTimer         = metrics.NewRegisteredTimer("miner/txsort/time", nil)
+	minerArrayifyTimer       = metrics.NewRegisteredTimer("miner/arrayify/time", nil)
+	minerPendingCountGauge   = metrics.NewRegisteredGauge("miner/pending/count", nil)
+	minerPendingAccountGauge = metrics.NewRegisteredGauge("miner/pending/accounts", nil)
 )
 
 // Task is the workers current environment and holds
@@ -376,20 +384,24 @@ func (self *worker) commitNewWork() {
 	var pending map[common.Address]types.Transactions
 	var err error
 	var nextBaseFee *big.Int
-	// Check any fork transitions needed
-	pending, err = self.backend.TxPool().Pending()
+
+	if self.config.IsMagmaForkEnabled(nextBlockNum) {
+		pset := self.govModule.GetParamSet(nextBlockNum.Uint64())
+		nextBaseFee = pset.ToKip71Config().NextMagmaBlockBaseFee(parent.Number(), parent.Header().BaseFee, parent.GasUsed())
+	}
+	pendingStart := time.Now()
+	pending, err = self.backend.TxPool().PendingWithBaseFee(nextBaseFee)
+	minerPendingTimer.Update(time.Since(pendingStart))
 	if err != nil {
 		logger.Error("Failed to fetch pending transactions", "err", err)
 		return
 	}
-
-	if self.config.IsMagmaForkEnabled(nextBlockNum) {
-		// NOTE-Kaia NextBlockBaseFee needs the header of parent, self.chain.CurrentBlock
-		// So above code, TxPool().Pending(), is separated with this and can be refactored later.
-		pset := self.govModule.GetParamSet(nextBlockNum.Uint64())
-		nextBaseFee = pset.ToKip71Config().NextMagmaBlockBaseFee(parent.Number(), parent.Header().BaseFee, parent.GasUsed())
-		pending = types.FilterTransactionWithBaseFee(pending, nextBaseFee)
+	minerPendingCountGauge.Update(int64(len(pending)))
+	totalPendingTxs := 0
+	for _, txs := range pending {
+		totalPendingTxs += len(txs)
 	}
+	minerPendingAccountGauge.Update(int64(totalPendingTxs))
 
 	// Filter txs with txBundlingModules
 	builder.FilterTxs(pending, self.txBundlingModules)
@@ -441,7 +453,9 @@ func (self *worker) commitNewWork() {
 	minerBalanceGauge.Update(getBalanceForGauge(self.current.state, self.nodeAddr))
 
 	// Sort txs and submit to consensus for execution
+	txSortStart := time.Now()
 	txs := types.NewTransactionsByPriceAndNonce(self.current.signer, pending, self.current.header.BaseFee)
+	minerTxSortTimer.Update(time.Since(txSortStart))
 
 	// Store pending work context and submit to consensus
 	self.pendingWork = self.current
@@ -645,8 +659,10 @@ func (env *Task) CommitTransactions(mux *event.TypeMux, txs *types.TransactionsB
 }
 
 func (env *Task) ApplyTransactions(txs *types.TransactionsByPriceAndNonce, bc BlockChain, nodeAddr common.Address, txBundlingModules []builder.TxBundlingModule) []*types.Log {
+	arrayifyStart := time.Now()
+	arrayTxs := builder.Arrayify(txs)
+	minerArrayifyTimer.Update(time.Since(arrayifyStart))
 	var (
-		arrayTxs                 = builder.Arrayify(txs)
 		incorporatedTxs, bundles = builder.ExtractBundlesAndIncorporate(arrayTxs, txBundlingModules)
 		totalTxs                 = len(incorporatedTxs)
 		totalBundles             = len(bundles)
