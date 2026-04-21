@@ -140,6 +140,9 @@ var (
 
 	// Effect metrics (priced-list reheap)
 	pricedReheapCountCounter = metrics.NewRegisteredCounter("txpool/priced/reheap/count", nil) // number of actual reheap passes
+
+	// Effect metric: txs dropped by baseFee filter in PendingWithBaseFee
+	minerPendingFilteredOutCounter = metrics.NewRegisteredCounter("miner/pending/filtered_out", nil)
 )
 
 // TxStatus is the current status of a transaction as seen by the pool.
@@ -731,6 +734,41 @@ func (pool *TxPool) pendingUnlocked() (map[common.Address]types.Transactions, er
 	for addr, list := range pool.pending {
 		pending[addr] = list.Flatten()
 	}
+	return pending, nil
+}
+
+// PendingWithBaseFee fuses Pending() + FilterTransactionWithBaseFee into a
+// single locked pass. Transactions with GasPrice < baseFee are truncated in
+// place per-account (txs are nonce-sorted, so the first sub-baseFee tx terminates
+// that account's list). Accounts with zero qualifying txs are omitted from the
+// result map entirely. When baseFee is nil, behaves exactly like Pending().
+func (pool *TxPool) PendingWithBaseFee(baseFee *big.Int) (map[common.Address]types.Transactions, error) {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	pool.txMu.Lock()
+	defer pool.txMu.Unlock()
+
+	if baseFee == nil {
+		return pool.pendingUnlocked()
+	}
+
+	pending := make(map[common.Address]types.Transactions, len(pool.pending))
+	var filteredOut int
+	for addr, list := range pool.pending {
+		txs := list.Flatten()
+		cutoff := len(txs)
+		for i, tx := range txs {
+			if tx.GasPrice().Cmp(baseFee) < 0 {
+				cutoff = i
+				break
+			}
+		}
+		filteredOut += len(txs) - cutoff
+		if cutoff > 0 {
+			pending[addr] = txs[:cutoff]
+		}
+	}
+	minerPendingFilteredOutCounter.Inc(int64(filteredOut))
 	return pending, nil
 }
 
