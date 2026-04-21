@@ -70,7 +70,6 @@ type PeerSet interface {
 	TypePeersWithoutTx(hash common.Hash, nodetype common.ConnType) []Peer
 	CNWithoutTx(hash common.Hash) []Peer
 	UpdateTypePeersWithoutTxs(tx *types.Transaction, nodeType common.ConnType, peersWithoutTxsMap map[Peer]types.Transactions)
-	BatchTypePeersWithoutTxs(txs types.Transactions, nodeTypes ...common.ConnType) map[Peer]types.Transactions
 
 	RegisterSnapExtension(peer *snap.Peer) error
 	WaitSnapExtension(peer Peer) (*snap.Peer, error)
@@ -410,43 +409,6 @@ func (ps *peerSet) CNWithoutTx(hash common.Hash) []Peer {
 		}
 	}
 	return list
-}
-
-// BatchTypePeersWithoutTxs builds the full peer -> txs mapping for broadcasting,
-// acquiring the peer-set read lock exactly ONCE for the whole batch instead of
-// per-tx. Peers are first filtered by their ConnType against the supplied set,
-// then each tx is routed to each peer that does not already know it.
-func (ps *peerSet) BatchTypePeersWithoutTxs(txs types.Transactions, nodeTypes ...common.ConnType) map[Peer]types.Transactions {
-	if len(txs) == 0 {
-		return nil
-	}
-	ps.lock.RLock()
-	defer ps.lock.RUnlock()
-
-	typeSet := make(map[common.ConnType]struct{}, len(nodeTypes))
-	for _, nt := range nodeTypes {
-		typeSet[nt] = struct{}{}
-	}
-	typedPeers := make([]Peer, 0, len(ps.peers))
-	for _, p := range ps.peers {
-		if _, ok := typeSet[p.ConnType()]; ok {
-			typedPeers = append(typedPeers, p)
-		}
-	}
-	if len(typedPeers) == 0 {
-		return nil
-	}
-
-	result := make(map[Peer]types.Transactions)
-	for _, tx := range txs {
-		hash := tx.Hash()
-		for _, p := range typedPeers {
-			if !p.KnowsTx(hash) {
-				result[p] = append(result[p], tx)
-			}
-		}
-	}
-	return result
 }
 
 // BestPeer retrieves the known peer with the currently highest total blockscore.

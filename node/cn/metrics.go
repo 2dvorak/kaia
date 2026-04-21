@@ -83,11 +83,10 @@ var (
 	broadcastTxsBatchGauge    = metrics.NewRegisteredGauge("klay/tx/broadcast/batchsize", nil)
 
 	// Effect metrics (per-peer async queue + wire-level)
-	asyncSendDropCounter       = metrics.NewRegisteredCounter("klay/tx/async/drop", nil)           // txs dropped when queuedTxs is full
-	wireSendsCounter           = metrics.NewRegisteredCounter("klay/tx/wire/sends", nil)           // number of p2p.Send(TxMsg) wire writes
-	wireTxsPerSendGauge        = metrics.NewRegisteredGauge("klay/tx/wire/txs_per_send", nil)      // size of the most recent wire write
-	coalesceIterationsCounter  = metrics.NewRegisteredCounter("klay/tx/coalesce/iterations", nil)  // extra batches greedily pulled into one wire write
-	resendBatchSizeGauge       = metrics.NewRegisteredGauge("klay/tx/resend/batchsize", nil)       // pending txs rebroadcast per txResend tick
+	asyncSendDropCounter = metrics.NewRegisteredCounter("klay/tx/async/drop", nil)        // txs dropped when queuedTxs is full
+	wireSendsCounter     = metrics.NewRegisteredCounter("klay/tx/wire/sends", nil)        // number of p2p.Send(TxMsg) wire writes
+	wireTxsPerSendGauge  = metrics.NewRegisteredGauge("klay/tx/wire/txs_per_send", nil)   // size of the most recent wire write
+	resendBatchSizeGauge = metrics.NewRegisteredGauge("klay/tx/resend/batchsize", nil)    // pending txs rebroadcast per txResend tick
 )
 
 // meteredMsgReadWriter is a wrapper around a p2p.MsgReadWriter, capable of

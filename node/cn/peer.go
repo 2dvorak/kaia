@@ -58,7 +58,7 @@ const (
 	// maxQueuedTxs is the maximum number of transaction lists to queue up before
 	// dropping broadcasts. This is a sensitive number as a transaction list might
 	// contain a single transaction, or thousands.
-	maxQueuedTxs = 1024
+	maxQueuedTxs = 128
 
 	// maxQueuedProps is the maximum number of block propagations to queue up before
 	// dropping broadcasts. There's not much point in queueing stale blocks, so a few
@@ -404,12 +404,6 @@ func newPeerWithRWs(version int, p *p2p.Peer, rws []p2p.MsgReadWriter) (Peer, er
 	}
 }
 
-// maxCoalescedTxsPerSend caps how many transactions are aggregated into a
-// single TxMsg wire-write. Coalescing reduces p2p.Send calls (each is one
-// RLP encode + one socket write + one receiver-side handleTxMsg +
-// pool.mu acquisition) when the queue has backlog.
-const maxCoalescedTxsPerSend = 512
-
 // Broadcast is a write loop that multiplexes block propagations, announcements
 // and transaction broadcasts into the remote peer. The goal is to have an async
 // writer that does not lock up node internals.
@@ -417,28 +411,14 @@ func (p *basePeer) Broadcast() {
 	for {
 		select {
 		case txs := <-p.queuedTxs:
-			// Greedy-drain more batches already waiting in the queue and
-			// coalesce into a single wire-level TxMsg. Preserves tx content
-			// and ordering; only reduces the number of p2p.Send calls.
-			combined := txs
-			for len(combined) < maxCoalescedTxsPerSend {
-				select {
-				case more := <-p.queuedTxs:
-					combined = append(combined, more...)
-					coalesceIterationsCounter.Inc(1)
-				default:
-					goto sendCombined
-				}
-			}
-		sendCombined:
 			wireSendsCounter.Inc(1)
-			wireTxsPerSendGauge.Update(int64(len(combined)))
-			if err := p.SendTransactions(combined); err != nil {
+			wireTxsPerSendGauge.Update(int64(len(txs)))
+			if err := p.SendTransactions(txs); err != nil {
 				logger.Error("fail to SendTransactions", "peer", p.id, "err", err)
 				continue
 				// return
 			}
-			p.Log().Trace("Broadcast transactions", "peer", p.id, "count", len(combined))
+			p.Log().Trace("Broadcast transactions", "peer", p.id, "count", len(txs))
 
 		case prop := <-p.queuedProps:
 			if err := p.SendNewBlock(prop.block, prop.td); err != nil {
