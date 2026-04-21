@@ -1638,11 +1638,13 @@ func (pm *ProtocolManager) broadcastTxsFromPN(txs types.Transactions) {
 
 func (pm *ProtocolManager) broadcastTxsFromEN(txs types.Transactions) {
 	peerFindStart := time.Now()
-	peersWithoutTxs := make(map[Peer]types.Transactions)
-	for _, tx := range txs {
-		pm.peers.UpdateTypePeersWithoutTxs(tx, common.CONSENSUSNODE, peersWithoutTxs)
-		pm.peers.UpdateTypePeersWithoutTxs(tx, common.PROXYNODE, peersWithoutTxs)
-		pm.peers.UpdateTypePeersWithoutTxs(tx, common.ENDPOINTNODE, peersWithoutTxs)
+	// Single lock acquisition + pre-filtered peer list for the whole batch.
+	peersWithoutTxs := pm.peers.BatchTypePeersWithoutTxs(txs,
+		common.CONSENSUSNODE, common.PROXYNODE, common.ENDPOINTNODE)
+	if peersWithoutTxs == nil {
+		peersWithoutTxs = make(map[Peer]types.Transactions)
+	}
+	for range txs {
 		txSendCounter.Inc(1)
 	}
 	broadcastTxsPeerFindTimer.Update(time.Since(peerFindStart))
