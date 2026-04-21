@@ -61,10 +61,6 @@ type TxPool interface {
 	// The slice should be modifiable by the caller.
 	Pending() (map[common.Address]types.Transactions, error)
 
-	// PendingWithBaseFee returns pending transactions filtered by baseFee in
-	// a single locked pass. If baseFee is nil, behaves like Pending().
-	PendingWithBaseFee(baseFee *big.Int) (map[common.Address]types.Transactions, error)
-
 	CachedPendingTxsByCount(count int) types.Transactions
 
 	// SubscribeNewTxsEvent should return an event subscription of

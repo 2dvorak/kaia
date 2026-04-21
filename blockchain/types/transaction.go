@@ -1210,10 +1210,10 @@ func (t *TransactionsByPriceAndNonce) Copy() *TransactionsByPriceAndNonce {
 	copy(headsCopy, t.heads)
 
 	return &TransactionsByPriceAndNonce{
-		txs:     txsCopy,
-		heads:   headsCopy, // fixed: previously shared backing array with the original
+		txs:     txsCopy, // shift changes it.
+		heads:   t.heads, // pop, shift changes it.
 		signer:  t.signer,
-		baseFee: t.baseFee,
+		baseFee: t.baseFee, // read-only
 	}
 }
 

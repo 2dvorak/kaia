@@ -104,6 +104,9 @@ var (
 	minerArrayifyTimer       = metrics.NewRegisteredTimer("miner/arrayify/time", nil)
 	minerPendingCountGauge   = metrics.NewRegisteredGauge("miner/pending/count", nil)
 	minerPendingAccountGauge = metrics.NewRegisteredGauge("miner/pending/accounts", nil)
+
+	// Effect metric: how many txs the baseFee filter dropped from the pending set
+	minerPendingFilteredOutCounter = metrics.NewRegisteredCounter("miner/pending/filtered_out", nil)
 )
 
 // Task is the workers current environment and holds
@@ -384,13 +387,9 @@ func (self *worker) commitNewWork() {
 	var pending map[common.Address]types.Transactions
 	var err error
 	var nextBaseFee *big.Int
-
-	if self.config.IsMagmaForkEnabled(nextBlockNum) {
-		pset := self.govModule.GetParamSet(nextBlockNum.Uint64())
-		nextBaseFee = pset.ToKip71Config().NextMagmaBlockBaseFee(parent.Number(), parent.Header().BaseFee, parent.GasUsed())
-	}
+	// Check any fork transitions needed
 	pendingStart := time.Now()
-	pending, err = self.backend.TxPool().PendingWithBaseFee(nextBaseFee)
+	pending, err = self.backend.TxPool().Pending()
 	minerPendingTimer.Update(time.Since(pendingStart))
 	if err != nil {
 		logger.Error("Failed to fetch pending transactions", "err", err)
@@ -402,6 +401,22 @@ func (self *worker) commitNewWork() {
 		totalPendingTxs += len(txs)
 	}
 	minerPendingAccountGauge.Update(int64(totalPendingTxs))
+
+	if self.config.IsMagmaForkEnabled(nextBlockNum) {
+		// NOTE-Kaia NextBlockBaseFee needs the header of parent, self.chain.CurrentBlock
+		// So above code, TxPool().Pending(), is separated with this and can be refactored later.
+		pset := self.govModule.GetParamSet(nextBlockNum.Uint64())
+		nextBaseFee = pset.ToKip71Config().NextMagmaBlockBaseFee(parent.Number(), parent.Header().BaseFee, parent.GasUsed())
+		filterStart := time.Now()
+		preFilterCount := totalPendingTxs
+		pending = types.FilterTransactionWithBaseFee(pending, nextBaseFee)
+		postFilterCount := 0
+		for _, txs := range pending {
+			postFilterCount += len(txs)
+		}
+		minerPendingFilteredOutCounter.Inc(int64(preFilterCount - postFilterCount))
+		minerFilterBaseFeeTimer.Update(time.Since(filterStart))
+	}
 
 	// Filter txs with txBundlingModules
 	builder.FilterTxs(pending, self.txBundlingModules)

@@ -603,27 +603,6 @@ func (l *txPricedList) Removed() {
 	pricedReheapTimer.Update(time.Since(start))
 }
 
-// RemovedBatch notifies the priced list that multiple old transactions dropped
-// from the pool at once. Unlike calling Removed() in a loop, this increments
-// the stale counter once and triggers at most one reheap.
-func (l *txPricedList) RemovedBatch(count int) {
-	l.stales += count
-	if l.stales <= len(*l.items)/4 {
-		return
-	}
-	pricedReheapCountCounter.Inc(1)
-	start := time.Now()
-	reheap := make(priceHeap, 0, l.all.Count())
-
-	l.stales, l.items = 0, &reheap
-	l.all.Range(func(hash common.Hash, tx *types.Transaction) bool {
-		*l.items = append(*l.items, tx)
-		return true
-	})
-	heap.Init(l.items)
-	pricedReheapTimer.Update(time.Since(start))
-}
-
 // Cap finds all the transactions below the given price threshold, drops them
 // from the priced list and returs them for further removal from the entire pool.
 func (l *txPricedList) Cap(threshold *big.Int, local *accountSet) types.Transactions {

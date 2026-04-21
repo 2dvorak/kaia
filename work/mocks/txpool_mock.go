@@ -181,21 +181,6 @@ func (mr *MockTxPoolMockRecorder) Pending() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Pending", reflect.TypeOf((*MockTxPool)(nil).Pending))
 }
 
-// PendingWithBaseFee mocks base method.
-func (m *MockTxPool) PendingWithBaseFee(baseFee *big.Int) (map[common.Address]types.Transactions, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "PendingWithBaseFee", baseFee)
-	ret0, _ := ret[0].(map[common.Address]types.Transactions)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// PendingWithBaseFee indicates an expected call of PendingWithBaseFee.
-func (mr *MockTxPoolMockRecorder) PendingWithBaseFee(baseFee interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PendingWithBaseFee", reflect.TypeOf((*MockTxPool)(nil).PendingWithBaseFee), baseFee)
-}
-
 // RegisterTxPoolModule mocks base method.
 func (m *MockTxPool) RegisterTxPoolModule(arg0 ...kaiax.TxPoolModule) {
 	m.ctrl.T.Helper()
