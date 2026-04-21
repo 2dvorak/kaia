@@ -27,6 +27,7 @@ import (
 	"math"
 	"math/big"
 	"sort"
+	"time"
 
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
@@ -589,6 +590,7 @@ func (l *txPricedList) Removed() {
 		return
 	}
 	// Seems we've reached a critical number of stale transactions, reheap
+	start := time.Now()
 	reheap := make(priceHeap, 0, l.all.Count())
 
 	l.stales, l.items = 0, &reheap
@@ -597,6 +599,7 @@ func (l *txPricedList) Removed() {
 		return true
 	})
 	heap.Init(l.items)
+	pricedReheapTimer.Update(time.Since(start))
 }
 
 // Cap finds all the transactions below the given price threshold, drops them
@@ -659,6 +662,8 @@ func (l *txPricedList) Underpriced(tx *types.Transaction, local *accountSet) boo
 // Discard finds a number of most underpriced transactions, removes them from the
 // priced list and returns them for further removal from the entire pool.
 func (l *txPricedList) Discard(slots int, local *accountSet) types.Transactions {
+	start := time.Now()
+	defer func() { pricedDiscardTimer.Update(time.Since(start)) }()
 	drop := make(types.Transactions, 0, slots) // Remote underpriced transactions to drop
 	save := make(types.Transactions, 0, 64)    // Local underpriced transactions to keep
 

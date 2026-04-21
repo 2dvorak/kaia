@@ -74,6 +74,13 @@ var (
 	propConsensusIstanbulInTrafficMeter  = metrics.NewRegisteredMeter("klay/prop/consensus/istanbul/in/traffic", nil)
 	propConsensusIstanbulOutPacketsMeter = metrics.NewRegisteredMeter("klay/prop/consensus/istanbul/out/packets", nil)
 	propConsensusIstanbulOutTrafficMeter = metrics.NewRegisteredMeter("klay/prop/consensus/istanbul/out/traffic", nil)
+
+	// Timing metrics for tx broadcast path
+	broadcastTxsTotalTimer    = metrics.NewRegisteredTimer("klay/tx/broadcast/total/time", nil)
+	broadcastTxsSortTimer     = metrics.NewRegisteredTimer("klay/tx/broadcast/sort/time", nil)
+	broadcastTxsPeerFindTimer = metrics.NewRegisteredTimer("klay/tx/broadcast/peerfind/time", nil)
+	broadcastTxsSendTimer     = metrics.NewRegisteredTimer("klay/tx/broadcast/send/time", nil)
+	broadcastTxsBatchGauge    = metrics.NewRegisteredGauge("klay/tx/broadcast/batchsize", nil)
 )
 
 // meteredMsgReadWriter is a wrapper around a p2p.MsgReadWriter, capable of
