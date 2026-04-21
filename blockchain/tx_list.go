@@ -590,6 +590,7 @@ func (l *txPricedList) Removed() {
 		return
 	}
 	// Seems we've reached a critical number of stale transactions, reheap
+	pricedReheapCountCounter.Inc(1)
 	start := time.Now()
 	reheap := make(priceHeap, 0, l.all.Count())
 
@@ -610,6 +611,7 @@ func (l *txPricedList) RemovedBatch(count int) {
 	if l.stales <= len(*l.items)/4 {
 		return
 	}
+	pricedReheapCountCounter.Inc(1)
 	start := time.Now()
 	reheap := make(priceHeap, 0, l.all.Count())
 

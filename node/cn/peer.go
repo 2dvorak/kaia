@@ -425,11 +425,14 @@ func (p *basePeer) Broadcast() {
 				select {
 				case more := <-p.queuedTxs:
 					combined = append(combined, more...)
+					coalesceIterationsCounter.Inc(1)
 				default:
 					goto sendCombined
 				}
 			}
 		sendCombined:
+			wireSendsCounter.Inc(1)
+			wireTxsPerSendGauge.Update(int64(len(combined)))
 			if err := p.SendTransactions(combined); err != nil {
 				logger.Error("fail to SendTransactions", "peer", p.id, "err", err)
 				continue
@@ -548,6 +551,7 @@ func (p *basePeer) AsyncSendTransactions(txs types.Transactions) {
 			p.AddToKnownTxs(tx.Hash())
 		}
 	default:
+		asyncSendDropCounter.Inc(int64(len(txs)))
 		p.Log().Trace("Dropping transaction propagation", "count", len(txs))
 	}
 }

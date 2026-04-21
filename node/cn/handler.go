@@ -1772,6 +1772,7 @@ func (pm *ProtocolManager) txResendLoop(period uint64, maxTxCount int) {
 func (pm *ProtocolManager) txResend(pending types.Transactions) {
 	txResendRoutineGauge.Update(txResendRoutineGauge.Value() + 1)
 	defer txResendRoutineGauge.Update(txResendRoutineGauge.Value() - 1)
+	resendBatchSizeGauge.Update(int64(len(pending)))
 	// TODO-Kaia drop or missing tx
 	if len(pending) > 0 {
 		logger.Debug("Tx Resend", "count", len(pending))

@@ -131,6 +131,13 @@ var (
 	// Batch size gauges
 	addTxsBatchSizeGauge = metrics.NewRegisteredGauge("txpool/addtxs/batchsize", nil)
 	promoteDirtyGauge    = metrics.NewRegisteredGauge("txpool/promote/dirty", nil)
+
+	// Effect metrics (fair-share eviction, priced reheap, baseFee filter)
+	promoteCapCallsCounter         = metrics.NewRegisteredCounter("txpool/promote/cap_calls", nil)      // list.Cap() calls per fair-share pass
+	promoteEvictedTxsCounter       = metrics.NewRegisteredCounter("txpool/promote/evicted_txs", nil)    // txs evicted by fair-share
+	promoteOffendersGauge          = metrics.NewRegisteredGauge("txpool/promote/offenders", nil)        // offender set size at latest eviction
+	pricedReheapCountCounter       = metrics.NewRegisteredCounter("txpool/priced/reheap/count", nil)    // actual reheap passes (not just calls)
+	minerPendingFilteredOutCounter = metrics.NewRegisteredCounter("miner/pending/filtered_out", nil)    // txs dropped by baseFee filter in PendingWithBaseFee
 )
 
 // TxStatus is the current status of a transaction as seen by the pool.
@@ -741,6 +748,7 @@ func (pool *TxPool) PendingWithBaseFee(baseFee *big.Int) (map[common.Address]typ
 	}
 
 	pending := make(map[common.Address]types.Transactions, len(pool.pending))
+	var filteredOut int
 	for addr, list := range pool.pending {
 		txs := list.Flatten()
 		cutoff := len(txs)
@@ -750,10 +758,12 @@ func (pool *TxPool) PendingWithBaseFee(baseFee *big.Int) (map[common.Address]typ
 				break
 			}
 		}
+		filteredOut += len(txs) - cutoff
 		if cutoff > 0 {
 			pending[addr] = txs[:cutoff]
 		}
 	}
+	minerPendingFilteredOutCounter.Inc(int64(filteredOut))
 	return pending, nil
 }
 
@@ -1828,6 +1838,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 				offenders = append(offenders, offenderInfo{addr, list.Len()})
 			}
 		}
+		promoteOffendersGauge.Update(int64(len(offenders)))
 		// Sort descending by tx count (highest spammers first)
 		sort.Slice(offenders, func(i, j int) bool {
 			return offenders[i].count > offenders[j].count
@@ -1870,6 +1881,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 				continue
 			}
 			list := pool.pending[off.addr]
+			promoteCapCallsCounter.Inc(1)
 			for _, tx := range list.Cap(target) {
 				hash := tx.Hash()
 				pool.all.Remove(hash)
@@ -1878,6 +1890,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 			}
 			pending -= uint64(off.count - target)
 		}
+		promoteEvictedTxsCounter.Inc(int64(removedCount))
 		// Batch-update the priced list stale counter (avoids mid-operation reheaps)
 		pool.priced.RemovedBatch(removedCount)
 
