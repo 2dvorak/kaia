@@ -120,6 +120,19 @@ var (
 	underpricedTxCounter = metrics.NewRegisteredCounter("txpool/underpriced", nil)
 	refusedTxCounter     = metrics.NewRegisteredCounter("txpool/refuse", nil)
 	slotsGauge           = metrics.NewRegisteredGauge("txpool/slots", nil)
+
+	// Timing metrics for tx submission path
+	addTxsTimer           = metrics.NewRegisteredTimer("txpool/addtxs/time", nil)
+	addTxsLockWaitTimer   = metrics.NewRegisteredTimer("txpool/addtxs/lockwait/time", nil)
+	promoteTimer          = metrics.NewRegisteredTimer("txpool/promote/time", nil)
+	promoteFairShareTimer = metrics.NewRegisteredTimer("txpool/promote/fairshare/time", nil)
+	pricedReheapTimer     = metrics.NewRegisteredTimer("txpool/priced/reheap/time", nil)
+	pricedDiscardTimer    = metrics.NewRegisteredTimer("txpool/priced/discard/time", nil)
+	validateTxTimer       = metrics.NewRegisteredTimer("txpool/validate/time", nil)
+
+	// Batch size gauges
+	addTxsBatchSizeGauge = metrics.NewRegisteredGauge("txpool/addtxs/batchsize", nil)
+	promoteDirtyGauge    = metrics.NewRegisteredGauge("txpool/promote/dirty", nil)
 )
 
 // TxStatus is the current status of a transaction as seen by the pool.
@@ -830,6 +843,8 @@ func (pool *TxPool) local() map[common.Address]types.Transactions {
 // validateTx checks whether a transaction is valid according to the consensus
 // rules and adheres to some heuristic limits of the local node (price and size).
 func (pool *TxPool) validateTx(tx *types.Transaction) error {
+	start := time.Now()
+	defer func() { validateTxTimer.Update(time.Since(start)) }()
 	// Accept only legacy transactions until EIP-2718/2930 activates.
 	if !pool.rules.IsEthTxType && tx.IsEthTypedTransaction() {
 		return ErrTxTypeNotSupported
@@ -1593,9 +1608,15 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 
 // addTxs attempts to queue a batch of transactions if they are valid.
 func (pool *TxPool) addTxs(txs []*types.Transaction, local bool) []error {
+	start := time.Now()
+	defer func() { addTxsTimer.Update(time.Since(start)) }()
+	addTxsBatchSizeGauge.Update(int64(len(txs)))
+
 	senderCacher.recover(pool.signer, txs)
 
+	lockStart := time.Now()
 	pool.mu.Lock()
+	addTxsLockWaitTimer.Update(time.Since(lockStart))
 	defer pool.mu.Unlock()
 
 	errs := pool.addTxsLocked(txs, local)
@@ -1621,6 +1642,7 @@ func (pool *TxPool) addTxsLocked(txs []*types.Transaction, local bool) []error {
 	}
 
 	// Only reprocess the internal state if something was actually added
+	promoteDirtyGauge.Update(int64(len(dirty)))
 	if len(dirty) > 0 {
 		addrs := make([]common.Address, 0, len(dirty))
 		for addr := range dirty {
@@ -1736,6 +1758,8 @@ func (pool *TxPool) removeTx(hash common.Hash, outofbound bool) {
 // future queue to the set of pending transactions. During this process, all
 // invalidated transactions (low nonce, low balance) are deleted.
 func (pool *TxPool) promoteExecutables(accounts []common.Address) {
+	start := time.Now()
+	defer func() { promoteTimer.Update(time.Since(start)) }()
 	pool.txMu.Lock()
 	defer pool.txMu.Unlock()
 	// Track the promoted transactions to broadcast them at once
@@ -1813,6 +1837,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 	}
 
 	if pending > pool.config.ExecSlotsAll {
+		fairStart := time.Now()
 		pendingBeforeCap := pending
 		// Assemble a spam order to penalize large transactors first
 		spammers := prque.New()
@@ -1873,6 +1898,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 			}
 		}
 		pendingRateLimitCounter.Inc(int64(pendingBeforeCap - pending))
+		promoteFairShareTimer.Update(time.Since(fairStart))
 	}
 	// If we've queued more transactions than the hard limit, drop oldest ones
 	queued := uint64(0)
