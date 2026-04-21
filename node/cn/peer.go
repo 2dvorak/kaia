@@ -411,6 +411,8 @@ func (p *basePeer) Broadcast() {
 	for {
 		select {
 		case txs := <-p.queuedTxs:
+			wireSendsCounter.Inc(1)
+			wireTxsPerSendGauge.Update(int64(len(txs)))
 			if err := p.SendTransactions(txs); err != nil {
 				logger.Error("fail to SendTransactions", "peer", p.id, "err", err)
 				continue
@@ -529,6 +531,7 @@ func (p *basePeer) AsyncSendTransactions(txs types.Transactions) {
 			p.AddToKnownTxs(tx.Hash())
 		}
 	default:
+		asyncSendDropCounter.Inc(int64(len(txs)))
 		p.Log().Trace("Dropping transaction propagation", "count", len(txs))
 	}
 }

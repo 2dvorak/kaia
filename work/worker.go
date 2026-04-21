@@ -105,6 +105,9 @@ var (
 	minerArrayifyTimer       = metrics.NewRegisteredTimer("miner/arrayify/time", nil)
 	minerPendingCountGauge   = metrics.NewRegisteredGauge("miner/pending/count", nil)
 	minerPendingAccountGauge = metrics.NewRegisteredGauge("miner/pending/accounts", nil)
+
+	// Effect metric: how many txs the baseFee filter dropped from the pending set
+	minerPendingFilteredOutCounter = metrics.NewRegisteredCounter("miner/pending/filtered_out", nil)
 )
 
 // Task is the workers current environment and holds
@@ -419,7 +422,13 @@ func (self *worker) commitNewWork(trigger newWorkTrigger) {
 		pset := self.govModule.GetParamSet(nextBlockNum.Uint64())
 		nextBaseFee = pset.ToKip71Config().NextMagmaBlockBaseFee(parent.Number(), parent.Header().BaseFee, parent.GasUsed())
 		filterStart := time.Now()
+		preFilterCount := totalPendingTxs
 		pending = types.FilterTransactionWithBaseFee(pending, nextBaseFee)
+		postFilterCount := 0
+		for _, txs := range pending {
+			postFilterCount += len(txs)
+		}
+		minerPendingFilteredOutCounter.Inc(int64(preFilterCount - postFilterCount))
 		minerFilterBaseFeeTimer.Update(time.Since(filterStart))
 	}
 
