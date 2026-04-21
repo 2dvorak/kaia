@@ -1631,8 +1631,8 @@ func (pm *ProtocolManager) broadcastTxsFromPN(txs types.Transactions) {
 
 	propTxPeersGauge.Update(int64(len(peersWithoutTxs) + len(cnPeersWithoutTxs)))
 	sendStart := time.Now()
-	sendTransactions(cnPeersWithoutTxs)
-	sendTransactions(peersWithoutTxs)
+	asyncSendTransactions(cnPeersWithoutTxs)
+	asyncSendTransactions(peersWithoutTxs)
 	broadcastTxsSendTimer.Update(time.Since(sendStart))
 }
 
@@ -1649,7 +1649,7 @@ func (pm *ProtocolManager) broadcastTxsFromEN(txs types.Transactions) {
 
 	propTxPeersGauge.Update(int64(len(peersWithoutTxs)))
 	sendStart := time.Now()
-	sendTransactions(peersWithoutTxs)
+	asyncSendTransactions(peersWithoutTxs)
 	broadcastTxsSendTimer.Update(time.Since(sendStart))
 }
 
@@ -1677,7 +1677,15 @@ func (pm *ProtocolManager) ReBroadcastTxs(txs types.Transactions) {
 	}
 
 	propTxPeersGauge.Update(int64(len(peersWithoutTxs)))
-	sendTransactions(peersWithoutTxs)
+	asyncSendTransactions(peersWithoutTxs)
+}
+
+// asyncSendTransactions delivers txs to each peer via its non-blocking queue,
+// decoupling the broadcast goroutine from per-peer network I/O.
+func asyncSendTransactions(txsSet map[Peer]types.Transactions) {
+	for peer, txs := range txsSet {
+		peer.AsyncSendTransactions(txs)
+	}
 }
 
 // sendTransactions iterates the given map with the key-value pair of Peer and Transactions
