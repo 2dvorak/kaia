@@ -132,6 +132,14 @@ var (
 	// Batch size gauges
 	addTxsBatchSizeGauge = metrics.NewRegisteredGauge("txpool/addtxs/batchsize", nil)
 	promoteDirtyGauge    = metrics.NewRegisteredGauge("txpool/promote/dirty", nil)
+
+	// Effect metrics (fair-share eviction)
+	promoteCapCallsCounter   = metrics.NewRegisteredCounter("txpool/promote/cap_calls", nil)   // number of list.Cap() calls per fair-share pass
+	promoteEvictedTxsCounter = metrics.NewRegisteredCounter("txpool/promote/evicted_txs", nil) // total txs evicted by fair-share
+	promoteOffendersGauge    = metrics.NewRegisteredGauge("txpool/promote/offenders", nil)     // size of offender set at latest eviction
+
+	// Effect metrics (priced-list reheap)
+	pricedReheapCountCounter = metrics.NewRegisteredCounter("txpool/priced/reheap/count", nil) // number of actual reheap passes
 )
 
 // TxStatus is the current status of a transaction as seen by the pool.
@@ -1787,12 +1795,15 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 		pendingBeforeCap := pending
 		// Assemble a spam order to penalize large transactors first
 		spammers := prque.New()
+		spammerCount := 0
 		for addr, list := range pool.pending {
 			// Only evict transactions from high rollers
 			if !pool.locals.contains(addr) && uint64(list.Len()) > pool.config.ExecSlotsAccount {
 				spammers.Push(addr, int64(list.Len()))
+				spammerCount++
 			}
 		}
+		promoteOffendersGauge.Update(int64(spammerCount))
 		// Gradually drop transactions from offenders
 		offenders := []common.Address{}
 		for pending > pool.config.ExecSlotsAll && !spammers.Empty() {
@@ -1829,7 +1840,9 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 			for pending > pool.config.ExecSlotsAll && uint64(pool.pending[offenders[len(offenders)-1]].Len()) > pool.config.ExecSlotsAccount {
 				for _, addr := range offenders {
 					list := pool.pending[addr]
+					promoteCapCallsCounter.Inc(1)
 					for _, tx := range list.Cap(list.Len() - 1) {
+						promoteEvictedTxsCounter.Inc(1)
 						// Drop the transaction from the global pools too
 						hash := tx.Hash()
 						pool.all.Remove(hash)
