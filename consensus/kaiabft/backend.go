@@ -210,6 +210,23 @@ func (b *backend) SubmitTransactions(txs *types.TransactionsByPriceAndNonce, sta
 			}
 		}()
 
+		if cv, ok := b.currentView.Load().(*bft.View); ok && cv != nil &&
+			cv.Sequence.Cmp(header.Number) == 0 {
+			proposer, err := b.valsetModule.GetProposer(cv.Sequence.Uint64(), cv.Round.Uint64())
+			if err != nil {
+				logger.Warn("Failed to resolve proposer for local block execution",
+					"number", header.Number.Uint64(), "viewSeq", cv.Sequence.Uint64(),
+					"viewRound", cv.Round.Uint64(), "self", b.address, "err", err)
+			} else if proposer != b.address {
+				logger.Debug("Skipping local block execution on non-proposer",
+					"number", header.Number.Uint64(), "proposer", proposer)
+				resultCh <- nil
+				return
+			}
+		}
+		// If currentView is stale or unavailable, fall through to the legacy
+		// full execution path as a defensive fallback.
+
 		validators, err := b.valsetModule.GetQualifiedValidators(header.Number.Uint64())
 		if err != nil {
 			resultCh <- nil
@@ -283,7 +300,7 @@ func (b *backend) APIs(chain consensus.ChainReader) []rpc.API {
 func (b *backend) PurgeCache() {}
 
 func (b *backend) SubscribeNewSequence() *event.TypeMuxSubscription {
-	return b.eventMux.Subscribe(newSequenceEvent{})
+	return b.eventMux.Subscribe(consensus.NewSequenceEvent{})
 }
 
 // ---------------------------------------------------------------------------
@@ -644,8 +661,6 @@ type messageEvent struct {
 }
 
 type chainHeadEvent struct{}
-
-type newSequenceEvent struct{}
 
 type backlogEvent struct {
 	src  common.Address
