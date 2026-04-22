@@ -636,11 +636,19 @@ func (m *machine) startNewRound(round *big.Int) {
 			m.sendPreprepare(&bft.Request{Proposal: m.preprepare.Proposal})
 		} else if m.pendingRequest != nil {
 			m.sendPreprepare(m.pendingRequest)
+		} else {
+			// With non-proposer execution skipped, a validator that becomes the
+			// proposer via round change may have no local pendingRequest for this
+			// sequence. Ask the worker to build one lazily.
+			logger.Info("Requesting local proposal build for round-change proposer",
+				"seq", newView.Sequence.Uint64(), "round", newView.Round.Uint64(),
+				"proposer", m.proposer, "self", m.b.address)
+			m.b.eventMux.Post(consensus.NewSequenceEvent{RoundChange: true})
 		}
 	}
 
 	if !roundChange {
-		m.b.eventMux.Post(newSequenceEvent{})
+		m.b.eventMux.Post(consensus.NewSequenceEvent{})
 	}
 
 	m.newRoundChangeTimer()

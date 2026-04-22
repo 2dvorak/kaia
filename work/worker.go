@@ -167,10 +167,12 @@ type worker struct {
 	executionModules  []kaiax.ExecutionModule
 	txBundlingModules []builder.TxBundlingModule
 
-	// Channels for consensus-worker communication
-	// finalizeCh receives finalized block results for DB write and broadcast
+	// Channels for consensus-worker communication.
+	// update() drives finalizeCh/pendingWork transitions, while the existing
+	// locks still guard lifecycle edges and snapshot access.
+	// finalizeCh receives finalized block results for DB write and broadcast.
 	finalizeCh <-chan *consensus.ExecutionResult
-	// newSequenceSub receives signals when a new block sequence starts (not round change)
+	// newSequenceSub receives new-sequence signals and lazy round-change build requests.
 	newSequenceSub *event.TypeMuxSubscription
 	// Pending work context for async execution
 	pendingWork      *Task
@@ -305,8 +307,14 @@ func (self *worker) update() {
 			self.handleFinalizedBlock(result)
 
 		// Handle new sequence event from consensus - start mining next block
-		case <-self.newSequenceSub.Chan():
-			self.commitNewWork()
+		case ev := <-self.newSequenceSub.Chan():
+			trigger := newWorkNextSequence
+			if req, ok := ev.Data.(consensus.NewSequenceEvent); ok {
+				if req.RoundChange {
+					trigger = newWorkRoundChangeProposer
+				}
+			}
+			self.commitNewWork(trigger)
 
 			// TODO-Klaytn-Issue264 If we are using istanbul BFT, then we always have a canonical chain.
 			//         Later we may be able to refine below code.
@@ -358,7 +366,14 @@ func (self *worker) waitForIdealBlockTime(parent *types.Block) {
 	}
 }
 
-func (self *worker) commitNewWork() {
+type newWorkTrigger uint8
+
+const (
+	newWorkNextSequence newWorkTrigger = iota
+	newWorkRoundChangeProposer
+)
+
+func (self *worker) commitNewWork(trigger newWorkTrigger) {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 	self.currentMu.Lock()
@@ -367,8 +382,11 @@ func (self *worker) commitNewWork() {
 	parent := self.chain.CurrentBlock()
 	nextBlockNum := new(big.Int).Add(parent.Number(), common.Big1)
 
-	// Wait for ideal block time to ensure consistent block intervals
-	self.waitForIdealBlockTime(parent)
+	// A round-change proposer already paid the timeout budget; delaying again
+	// here only widens the round-change to preprepare path.
+	if trigger != newWorkRoundChangeProposer {
+		self.waitForIdealBlockTime(parent)
+	}
 	tstart := time.Now()
 
 	core.Vrank.Log()
@@ -475,6 +493,8 @@ func (self *worker) handleFinalizedBlock(result *consensus.ExecutionResult) {
 
 	if result == nil || result.Block == nil {
 		// Not the proposer - block will be received via ChainHeadEvent
+		self.pendingWork = nil
+		self.finalizeCh = nil
 		logger.Debug("Not proposer, waiting for block via ChainHeadEvent")
 		return
 	}
@@ -706,6 +726,7 @@ func (env *Task) ApplyTransactions(txs *types.TransactionsByPriceAndNonce, bc Bl
 		RunningEVM: chEVM,
 	}
 
+	// Read the mutable CLI-tuned limit once for this block-building round.
 	txLimit := params.BlockGenerationTxLimit
 	arrayTxs := builder.ArrayifyByCount(txs, txLimit)
 	incorporatedTxs, bundles := builder.ExtractBundlesAndIncorporate(arrayTxs, txBundlingModules)
