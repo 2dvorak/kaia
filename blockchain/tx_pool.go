@@ -254,8 +254,15 @@ type TxPool struct {
 
 	wg sync.WaitGroup // for shutdown sync
 
-	txMsgCh  chan types.Transactions // A buffer for async tx intake via AddRemotes
-	txFeedCh chan types.Transactions // A buffer for async tx event emission via txFeed
+	txMsgCh chan types.Transactions // A buffer for async tx intake via AddRemotes
+
+	// scheduleReorgLoop coordinates reset/promote work and event emission off
+	// the ingest hot path, coalescing concurrent requests into a single reorg.
+	reqResetCh      chan *txpoolResetRequest
+	reqPromoteCh    chan *accountSet
+	queueTxEventCh  chan *types.Transaction
+	reorgDoneCh     chan chan struct{}
+	reorgShutdownCh chan struct{}
 
 	missingBlobSidecarsCh chan *MissingBlobSidecar // A buffer for async missing blob sidecars event emission
 
@@ -303,13 +310,23 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 		gasPrice:              new(big.Int).SetUint64(pset.UnitPrice),
 		blobBaseFee:           new(big.Int).SetUint64(params.ZeroBaseFee),
 		txMsgCh:               make(chan types.Transactions, txMsgChSize),
-		txFeedCh:              make(chan types.Transactions, txFeedChSize),
+		reqResetCh:            make(chan *txpoolResetRequest),
+		reqPromoteCh:          make(chan *accountSet),
+		queueTxEventCh:        make(chan *types.Transaction),
+		reorgDoneCh:           make(chan chan struct{}),
+		reorgShutdownCh:       make(chan struct{}),
 		missingBlobSidecarsCh: make(chan *MissingBlobSidecar, missingBlobSidecarsChSize),
 		govModule:             govModule,
 	}
 	pool.locals = newAccountSet(pool.signer)
 	pool.priced = newTxPricedList(pool.all)
 	pool.reset(nil, chain.CurrentBlock().Header())
+
+	// scheduleReorgLoop must be running before any path that calls
+	// requestPromoteExecutables (e.g. journal.load → AddLocals → addTx) to
+	// avoid the requester blocking on reqPromoteCh forever.
+	pool.wg.Add(1)
+	go pool.scheduleReorgLoop()
 
 	// If local transactions and journaling is enabled, load from disk
 	if !config.NoLocals && config.Journal != "" {
@@ -330,11 +347,10 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 		pool.blobStorage = NewBlobStorage(*config.BlobStorageConfig)
 	}
 
-	// Start the event loop and return
-	pool.wg.Add(3)
+	// Start the rest of the event loop goroutines.
+	pool.wg.Add(2)
 	go pool.loop()
 	go pool.handleTxMsg()
-	go pool.handleTxFeed()
 
 	if config.EnableSpamThrottlerAtRuntime {
 		if err := pool.StartSpamThrottler(DefaultSpamThrottlerConfig); err != nil {
@@ -373,18 +389,17 @@ func (pool *TxPool) loop() {
 		case ev := <-pool.chainHeadCh:
 			if ev.Block != nil {
 				pool.saveAndPruneBlobStorage(ev.Block)
-				pool.mu.Lock()
 				currBlock := pool.chain.CurrentBlock()
 				if ev.Block.Root() != currBlock.Root() {
-					pool.mu.Unlock()
 					logger.Debug("block from ChainHeadEvent is different from the CurrentBlock",
 						"receivedNum", ev.Block.NumberU64(), "receivedHash", ev.Block.Hash().String(),
 						"currNum", currBlock.NumberU64(), "currHash", currBlock.Hash().String())
 					continue
 				}
-				pool.reset(head.Header(), ev.Block.Header())
+				// Hand the reset to scheduleReorgLoop and wait for it to finish so
+				// the chainHead-driven semantics stay synchronous from the loop's POV.
+				<-pool.requestReset(head.Header(), ev.Block.Header())
 				head = ev.Block
-				pool.mu.Unlock()
 			}
 		// Be unsubscribed due to system stopped
 		case <-pool.chainHeadSub.Err():
@@ -448,10 +463,10 @@ func (pool *TxPool) lockedReset(oldHead, newHead *types.Header) {
 }
 
 // reset retrieves the current state of the blockchain and ensures the content
-// of the transaction pool is valid with regard to the chain state.
-func (pool *TxPool) reset(oldHead, newHead *types.Header) {
-	defer pool.publishPendingSnapshotLocked()
-
+// of the transaction pool is valid with regard to the chain state. It returns
+// the set of transactions promoted by the post-reset full-queue promote pass
+// so the caller (typically runReorg) can broadcast a single NewTxsEvent.
+func (pool *TxPool) reset(oldHead, newHead *types.Header) types.Transactions {
 	pool.txMu.Lock()
 	var drops []common.Hash
 	for _, module := range pool.modules {
@@ -489,7 +504,7 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 				if newNum >= oldNum {
 					logger.Error("Transaction pool reset with missing oldhead",
 						"old", oldHead.Hash(), "oldnum", oldNum, "new", newHead.Hash(), "newnum", newNum)
-					return
+					return nil
 				} else {
 					// When setHead is performed, then oldHead becomes bigger than newHead, since newHead becomes rewinded blockNumber.
 					// If that is the case, we don't have the lost transactions anymore, and
@@ -502,26 +517,26 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 					discarded = append(discarded, rem.Transactions()...)
 					if rem = pool.chain.GetBlock(rem.ParentHash(), rem.NumberU64()-1); rem == nil {
 						logger.Error("Unrooted old chain seen by tx pool", "block", oldHead.Number, "hash", oldHead.Hash())
-						return
+						return nil
 					}
 				}
 				for add.NumberU64() > rem.NumberU64() {
 					included = append(included, add.Transactions()...)
 					if add = pool.chain.GetBlock(add.ParentHash(), add.NumberU64()-1); add == nil {
 						logger.Error("Unrooted new chain seen by tx pool", "block", newHead.Number, "hash", newHead.Hash())
-						return
+						return nil
 					}
 				}
 				for rem.Hash() != add.Hash() {
 					discarded = append(discarded, rem.Transactions()...)
 					if rem = pool.chain.GetBlock(rem.ParentHash(), rem.NumberU64()-1); rem == nil {
 						logger.Error("Unrooted old chain seen by tx pool", "block", oldHead.Number, "hash", oldHead.Hash())
-						return
+						return nil
 					}
 					included = append(included, add.Transactions()...)
 					if add = pool.chain.GetBlock(add.ParentHash(), add.NumberU64()-1); add == nil {
 						logger.Error("Unrooted new chain seen by tx pool", "block", newHead.Number, "hash", newHead.Hash())
-						return
+						return nil
 					}
 				}
 				reinject = types.TxDifference(discarded, included)
@@ -536,7 +551,7 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 	stateDB, err := pool.chain.StateAt(newHead.Root)
 	if err != nil {
 		logger.Error("Failed to reset txpool state", "err", err)
-		return
+		return nil
 	}
 	pool.currentState = stateDB
 	pool.pendingNonce = make(map[common.Address]uint64)
@@ -549,7 +564,7 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 	// pool.mu.Lock()
 	// defer pool.mu.Unlock()
 
-	pool.addTxsLocked(reinject, false)
+	pool.addTxsLocked(reinject, false, pool.rules)
 
 	// validate the pool of pending transactions, this will remove
 	// any transactions that have been included in the block or
@@ -569,7 +584,7 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 	pool.txMu.Unlock()
 	// Check the queue and move transactions over to the pending if possible
 	// or remove those that have become invalid
-	pool.promoteExecutables(nil)
+	promoted := pool.promoteExecutables(nil)
 
 	// Update all fork indicator by next pending block number.
 	pool.rules = pool.chainconfig.Rules(new(big.Int).Add(newHead.Number, big.NewInt(1)))
@@ -607,6 +622,8 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 			module.PostReset(oldHead, newHead, queue, pending)
 		}
 	}()
+
+	return promoted
 }
 
 // Stop terminates the transaction pool.
@@ -616,6 +633,9 @@ func (pool *TxPool) Stop() {
 
 	// Unsubscribe subscriptions registered from blockchain
 	pool.chainHeadSub.Unsubscribe()
+	// Signal scheduleReorgLoop to drain and exit so any goroutines blocked on
+	// requestReset / requestPromoteExecutables / queueTxEvent unblock cleanly.
+	close(pool.reorgShutdownCh)
 	pool.wg.Wait()
 
 	if pool.journal != nil {
@@ -829,28 +849,46 @@ func (pool *TxPool) local() map[common.Address]types.Transactions {
 
 // validateTx checks whether a transaction is valid according to the consensus
 // rules and adheres to some heuristic limits of the local node (price and size).
+//
+// validateTx is a convenience wrapper that runs validateTxBasics (stateless,
+// no lock required) followed by validateTxState (state-aware, requires
+// pool.mu). New ingest paths should prefer running the basics half outside the
+// pool lock so malformed traffic does not contend on pool.mu.
 func (pool *TxPool) validateTx(tx *types.Transaction) error {
+	start := time.Now()
+	defer func() { validateTxTimer.Update(time.Since(start)) }()
+	if err := pool.validateTxBasics(tx, pool.rules); err != nil {
+		return err
+	}
+	return pool.validateTxState(tx)
+}
+
+// validateTxBasics performs all stateless validation of a tx (consensus type
+// gating, init-code/size/gas-limit/chain-id checks, dynamic-fee shape, data
+// size, negative value). It reads only the supplied fork rules and the
+// immutable pool.chainconfig, so it is safe to call without holding pool.mu.
+func (pool *TxPool) validateTxBasics(tx *types.Transaction, rules params.Rules) error {
 	// Accept only legacy transactions until EIP-2718/2930 activates.
-	if !pool.rules.IsEthTxType && tx.IsEthTypedTransaction() {
+	if !rules.IsEthTxType && tx.IsEthTypedTransaction() {
 		return ErrTxTypeNotSupported
 	}
 	// Reject dynamic fee transactions until EIP-1559 activates.
-	if !pool.rules.IsEthTxType && tx.Type() == types.TxTypeEthereumDynamicFee {
+	if !rules.IsEthTxType && tx.Type() == types.TxTypeEthereumDynamicFee {
 		return ErrTxTypeNotSupported
 	}
 
 	// Reject set code transactions until EIP-7600(prague) activates.
-	if !pool.rules.IsPrague && tx.Type() == types.TxTypeEthereumSetCode {
+	if !rules.IsPrague && tx.Type() == types.TxTypeEthereumSetCode {
 		return ErrTxTypeNotSupported
 	}
 
 	// Reject blob transactions until EIP-7607(osaka) activates.
-	if !pool.rules.IsOsaka && tx.Type() == types.TxTypeEthereumBlob {
+	if !rules.IsOsaka && tx.Type() == types.TxTypeEthereumBlob {
 		return ErrTxTypeNotSupported
 	}
 
 	// Check whether the init code size has been exceeded
-	if pool.rules.IsShanghai && tx.To() == nil && len(tx.Data()) > params.MaxInitCodeSize {
+	if rules.IsShanghai && tx.To() == nil && len(tx.Data()) > params.MaxInitCodeSize {
 		return fmt.Errorf("%w: code size %v, limit %v", ErrMaxInitCodeSizeExceeded, len(tx.Data()), params.MaxInitCodeSize)
 	}
 
@@ -864,55 +902,18 @@ func (pool *TxPool) validateTx(tx *types.Transaction) error {
 		return ErrInvalidChainId
 	}
 
-	// NOTE-Kaia Drop transactions with unexpected gasPrice
-	// If the transaction type is DynamicFee tx, Compare transaction's GasFeeCap(MaxFeePerGas) and GasTipCap with tx pool's gasPrice to check to have same value.
+	// Dynamic-fee shape checks. The pool-gasPrice / Magma comparison lives in
+	// validateTxState; only stateless shape rules belong here.
 	if tx.Type() == types.TxTypeEthereumDynamicFee || tx.Type() == types.TxTypeEthereumSetCode {
-		// Sanity check for extremely large numbers
 		if tx.GasTipCap().BitLen() > 256 {
 			return ErrTipVeryHigh
 		}
-
 		if tx.GasFeeCap().BitLen() > 256 {
 			return ErrFeeCapVeryHigh
 		}
-
 		// Ensure gasFeeCap is greater than or equal to gasTipCap.
 		if tx.GasFeeCap().Cmp(tx.GasTipCap()) < 0 {
 			return ErrTipAboveFeeCap
-		}
-
-		if pool.rules.IsMagma {
-			// Ensure transaction's gasFeeCap is greater than or equal to transaction pool's gasPrice(baseFee).
-			if pool.gasPrice.Cmp(tx.GasFeeCap()) > 0 {
-				logger.Trace("fail to validate maxFeePerGas", "pool.gasPrice", pool.gasPrice, "maxFeePerGas", tx.GasFeeCap())
-				return ErrFeeCapBelowBaseFee
-			}
-		} else {
-
-			if pool.gasPrice.Cmp(tx.GasTipCap()) != 0 {
-				logger.Trace("fail to validate maxPriorityFeePerGas", "unitprice", pool.gasPrice, "maxPriorityFeePerGas", tx.GasFeeCap())
-				return ErrInvalidGasTipCap
-			}
-
-			if pool.gasPrice.Cmp(tx.GasFeeCap()) != 0 {
-				logger.Trace("fail to validate maxFeePerGas", "unitprice", pool.gasPrice, "maxFeePerGas", tx.GasTipCap())
-				return ErrInvalidGasFeeCap
-			}
-		}
-
-	} else {
-		if pool.rules.IsMagma {
-			if pool.gasPrice.Cmp(tx.GasPrice()) > 0 {
-				// Ensure transaction's gasPrice is greater than or equal to transaction pool's gasPrice(baseFee).
-				logger.Trace("fail to validate gasprice", "pool.gasPrice", pool.gasPrice, "tx.gasPrice", tx.GasPrice())
-				return ErrGasPriceBelowBaseFee
-			}
-		} else {
-			// Unitprice policy before magma hardfork
-			if pool.gasPrice.Cmp(tx.GasPrice()) != 0 {
-				logger.Trace("fail to validate unitprice", "unitPrice", pool.gasPrice, "txUnitPrice", tx.GasPrice())
-				return ErrInvalidUnitPrice
-			}
 		}
 	}
 
@@ -927,6 +928,53 @@ func (pool *TxPool) validateTx(tx *types.Transaction) error {
 	// transactions but may occur if you create a transaction using the RPC.
 	if tx.Value().Sign() < 0 {
 		return ErrNegativeValue
+	}
+
+	return nil
+}
+
+// validateTxState performs all state-aware validation of a tx: pool-gasPrice
+// and Magma fee semantics, sender signature/nonce, balance (including
+// fee-delegation paths), intrinsic-gas and floor-data-gas, type-specific
+// blob/set-code/auth checks, and tx.Validate() against the current state.
+//
+// Caller must hold pool.mu (read or write); this function reads pool.gasPrice,
+// pool.rules, pool.signer, pool.currentState, pool.currentBlockNumber and
+// pool.modules.
+func (pool *TxPool) validateTxState(tx *types.Transaction) error {
+	// NOTE-Kaia Drop transactions with unexpected gasPrice
+	// If the transaction type is DynamicFee tx, Compare transaction's GasFeeCap(MaxFeePerGas) and GasTipCap with tx pool's gasPrice to check to have same value.
+	if tx.Type() == types.TxTypeEthereumDynamicFee || tx.Type() == types.TxTypeEthereumSetCode {
+		if pool.rules.IsMagma {
+			// Ensure transaction's gasFeeCap is greater than or equal to transaction pool's gasPrice(baseFee).
+			if pool.gasPrice.Cmp(tx.GasFeeCap()) > 0 {
+				logger.Trace("fail to validate maxFeePerGas", "pool.gasPrice", pool.gasPrice, "maxFeePerGas", tx.GasFeeCap())
+				return ErrFeeCapBelowBaseFee
+			}
+		} else {
+			if pool.gasPrice.Cmp(tx.GasTipCap()) != 0 {
+				logger.Trace("fail to validate maxPriorityFeePerGas", "unitprice", pool.gasPrice, "maxPriorityFeePerGas", tx.GasFeeCap())
+				return ErrInvalidGasTipCap
+			}
+			if pool.gasPrice.Cmp(tx.GasFeeCap()) != 0 {
+				logger.Trace("fail to validate maxFeePerGas", "unitprice", pool.gasPrice, "maxFeePerGas", tx.GasTipCap())
+				return ErrInvalidGasFeeCap
+			}
+		}
+	} else {
+		if pool.rules.IsMagma {
+			if pool.gasPrice.Cmp(tx.GasPrice()) > 0 {
+				// Ensure transaction's gasPrice is greater than or equal to transaction pool's gasPrice(baseFee).
+				logger.Trace("fail to validate gasprice", "pool.gasPrice", pool.gasPrice, "tx.gasPrice", tx.GasPrice())
+				return ErrGasPriceBelowBaseFee
+			}
+		} else {
+			// Unitprice policy before magma hardfork
+			if pool.gasPrice.Cmp(tx.GasPrice()) != 0 {
+				logger.Trace("fail to validate unitprice", "unitPrice", pool.gasPrice, "txUnitPrice", tx.GasPrice())
+				return ErrInvalidUnitPrice
+			}
+		}
 	}
 
 	// Make sure the transaction is signed properly
@@ -1258,7 +1306,8 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		logger.Trace("Pooled new executable transaction", "hash", hash, "from", from, "to", tx.To())
 
 		// We've directly injected a replacement transaction, notify subsystems
-		pool.txFeedCh <- types.Transactions{tx}
+		// via the coalesced reorg loop. The event fires on the next runReorg.
+		pool.queueTxEvent(tx)
 
 		return old != nil, nil
 	}
@@ -1490,19 +1539,6 @@ func (pool *TxPool) handleTxMsg() {
 	}
 }
 
-func (pool *TxPool) handleTxFeed() {
-	defer pool.wg.Done()
-
-	for {
-		select {
-		case txs := <-pool.txFeedCh:
-			pool.txFeed.Send(NewTxsEvent{txs})
-		case <-pool.chainHeadSub.Err():
-			return
-		}
-	}
-}
-
 // AddLocal enqueues a single transaction into the pool if it is valid, marking
 // the sender as a local one in the mean time, ensuring it goes around the local
 // pricing constraints.
@@ -1567,6 +1603,11 @@ func (pool *TxPool) checkAndAddTxs(txs []*types.Transaction, local bool) []error
 }
 
 // addTx enqueues a single transaction into the pool if it is valid.
+//
+// Stateless validation runs *before* pool.mu is taken so that malformed traffic
+// is rejected without contending on the pool lock. Promotion is delegated to
+// scheduleReorgLoop, which coalesces concurrent requests into batched runReorg
+// runs and emits a single NewTxsEvent per run.
 func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 	// Pre-warm tx caches off-lock so validateTx never pays ecrecover/hash
 	// under pool.mu. The async senderCacher loses the lock race for single-tx.
@@ -1574,20 +1615,30 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 	_ = tx.Hash()
 	_ = tx.Size()
 
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-	defer pool.publishPendingSnapshotLocked()
+	pool.mu.RLock()
+	rules := pool.rules
+	pool.mu.RUnlock()
+	if err := pool.validateTxBasics(tx, rules); err != nil {
+		invalidTxCounter.Inc(1)
+		return err
+	}
 
-	// Try to inject the transaction and update any state
+	pool.mu.Lock()
 	replace, err := pool.add(tx, local)
+	pool.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	// If we added a new transaction, run promotion checks and return
+
+	// Always request a reorg run: when replace is true the inserted tx already
+	// landed in pending and was queued via Site A (queueTxEvent); the request
+	// simply ensures the next runReorg flushes the queued event. When replace
+	// is false the dirty set carries the sender so promote runs for it.
+	dirty := newAccountSet(pool.signer)
 	if !replace {
-		from, _ := types.Sender(pool.signer, tx) // already validated
-		pool.promoteExecutables([]common.Address{from})
+		dirty.addTx(tx)
 	}
+	<-pool.requestPromoteExecutables(dirty)
 	return nil
 }
 
@@ -1595,40 +1646,52 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 func (pool *TxPool) addTxs(txs []*types.Transaction, local bool) []error {
 	senderCacher.recover(pool.signer, txs)
 
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
+	pool.mu.RLock()
+	rules := pool.rules
+	pool.mu.RUnlock()
 
-	errs := pool.addTxsLocked(txs, local)
-	pool.publishPendingSnapshotLocked()
+	errs := make([]error, len(txs))
+	lockStart := time.Now()
+	pool.mu.Lock()
+	addTxsLockWaitTimer.Update(time.Since(lockStart))
+	dirty, addErrs := pool.addTxsLocked(txs, local, rules)
+	pool.mu.Unlock()
+	copy(errs, addErrs)
+
+	if dirty != nil && !dirty.empty() {
+		<-pool.requestPromoteExecutables(dirty)
+	}
 	return errs
 }
 
 // addTxsLocked attempts to queue a batch of transactions if they are valid,
-// whilst assuming the transaction pool lock is already held.
-func (pool *TxPool) addTxsLocked(txs []*types.Transaction, local bool) []error {
-	// Add the batch of transaction, tracking the accepted ones
-	dirty := make(map[common.Address]struct{})
+// whilst assuming the transaction pool lock is already held. It returns the
+// set of dirty senders (non-replacement adds) and the per-tx error slice.
+//
+// Promotion is the caller's responsibility (typically via
+// requestPromoteExecutables on the returned dirty set), so this function never
+// fires events directly.
+func (pool *TxPool) addTxsLocked(txs []*types.Transaction, local bool, rules params.Rules) (*accountSet, []error) {
+	dirty := newAccountSet(pool.signer)
 	errs := make([]error, len(txs))
 
 	for i, tx := range txs {
+		// Stateless validation may run while the lock is held (no pool state
+		// is required); rejecting here avoids paying the rest of pool.add.
+		if err := pool.validateTxBasics(tx, rules); err != nil {
+			errs[i] = err
+			invalidTxCounter.Inc(1)
+			continue
+		}
 		var replace bool
 		if replace, errs[i] = pool.add(tx, local); errs[i] == nil {
 			if !replace {
-				from, _ := types.Sender(pool.signer, tx) // already validated
-				dirty[from] = struct{}{}
+				dirty.addTx(tx)
 			}
 		}
 	}
-
-	// Only reprocess the internal state if something was actually added
-	if len(dirty) > 0 {
-		addrs := make([]common.Address, 0, len(dirty))
-		for addr := range dirty {
-			addrs = append(addrs, addr)
-		}
-		pool.promoteExecutables(addrs)
-	}
-	return errs
+	promoteDirtyGauge.Update(int64(len(dirty.accounts)))
+	return dirty, errs
 }
 
 // Status returns the status (unknown/pending/queued) of a batch of transactions
@@ -1735,7 +1798,12 @@ func (pool *TxPool) removeTx(hash common.Hash, outofbound bool) {
 // promoteExecutables moves transactions that have become processable from the
 // future queue to the set of pending transactions. During this process, all
 // invalidated transactions (low nonce, low balance) are deleted.
-func (pool *TxPool) promoteExecutables(accounts []common.Address) {
+//
+// Returns the set of newly promoted transactions so the caller can broadcast
+// them via a coalesced NewTxsEvent. runReorg emits a single NewTxsEvent per run.
+func (pool *TxPool) promoteExecutables(accounts []common.Address) []*types.Transaction {
+	start := time.Now()
+	defer func() { promoteTimer.Update(time.Since(start)) }()
 	pool.txMu.Lock()
 	defer pool.txMu.Unlock()
 	// Track the promoted transactions to broadcast them at once
@@ -1801,10 +1869,6 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 		if list.Empty() {
 			delete(pool.queue, addr)
 		}
-	}
-	// Notify subsystem for new promoted transactions.
-	if len(promoted) > 0 {
-		pool.txFeedCh <- promoted
 	}
 	// If the pending limit is overflown, start equalizing allowances
 	pending := uint64(0)
@@ -1915,6 +1979,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 			}
 		}
 	}
+	return promoted
 }
 
 // demoteUnexecutables removes invalid and processed transactions from the pools
@@ -2339,4 +2404,179 @@ func (pool *TxPool) Clear() {
 	pool.queue = make(map[common.Address]*txList)
 	pool.pendingNonce = make(map[common.Address]uint64)
 	pool.publishPendingSnapshotLocked()
+}
+
+// txpoolResetRequest carries an oldHead/newHead pair from the chainHeadCh
+// handler to scheduleReorgLoop. Multiple concurrent requests are coalesced
+// into the latest newHead, so a burst of head events runs at most one reset.
+type txpoolResetRequest struct {
+	oldHead, newHead *types.Header
+}
+
+// addTx inserts the sender of tx into the dirty set if its sender can be
+// derived. accountSet has the embedded signer for that purpose.
+func (as *accountSet) addTx(tx *types.Transaction) {
+	if addr, err := types.Sender(as.signer, tx); err == nil {
+		as.accounts[addr] = struct{}{}
+	}
+}
+
+// merge folds another set of dirty addresses into the receiver.
+func (as *accountSet) merge(other *accountSet) {
+	if other == nil {
+		return
+	}
+	for addr := range other.accounts {
+		as.accounts[addr] = struct{}{}
+	}
+}
+
+// flatten returns the dirty addresses as a slice for promote requests.
+func (as *accountSet) flatten() []common.Address {
+	addrs := make([]common.Address, 0, len(as.accounts))
+	for addr := range as.accounts {
+		addrs = append(addrs, addr)
+	}
+	return addrs
+}
+
+// empty reports whether the set has any addresses.
+func (as *accountSet) empty() bool { return len(as.accounts) == 0 }
+
+// requestReset hands a chainHead reset to scheduleReorgLoop and returns the
+// channel that closes when the resulting runReorg has finished. Selecting on
+// reorgShutdownCh ensures callers do not deadlock during pool.Stop().
+func (pool *TxPool) requestReset(oldHead, newHead *types.Header) chan struct{} {
+	select {
+	case pool.reqResetCh <- &txpoolResetRequest{oldHead, newHead}:
+		return <-pool.reorgDoneCh
+	case <-pool.reorgShutdownCh:
+		return pool.reorgShutdownCh
+	}
+}
+
+// requestPromoteExecutables hands a dirty-account set to scheduleReorgLoop and
+// returns the channel that closes when the resulting runReorg has finished.
+func (pool *TxPool) requestPromoteExecutables(set *accountSet) chan struct{} {
+	select {
+	case pool.reqPromoteCh <- set:
+		return <-pool.reorgDoneCh
+	case <-pool.reorgShutdownCh:
+		return pool.reorgShutdownCh
+	}
+}
+
+// queueTxEvent enqueues a transaction event to be sent on the next runReorg.
+// This is the Site A path (replacement-into-pending) where the tx already
+// landed in pending and just needs to be announced.
+func (pool *TxPool) queueTxEvent(tx *types.Transaction) {
+	select {
+	case pool.queueTxEventCh <- tx:
+	case <-pool.reorgShutdownCh:
+	}
+}
+
+// scheduleReorgLoop services reset / promote / queueTxEvent requests, merging
+// concurrent ones into a single runReorg. At most one runReorg is in flight at
+// a time; further requests pile up and ride the next run.
+func (pool *TxPool) scheduleReorgLoop() {
+	defer pool.wg.Done()
+
+	var (
+		curDone       chan struct{} // non-nil while a runReorg is in flight
+		nextDone      = make(chan struct{})
+		launchNextRun bool
+		reset         *txpoolResetRequest
+		dirtyAccounts *accountSet
+		queuedEvents  = make(map[common.Address]types.Transactions)
+	)
+
+	for {
+		// Launch the next runReorg if there is queued work and none is in flight.
+		if curDone == nil && launchNextRun {
+			go pool.runReorg(nextDone, reset, dirtyAccounts, queuedEvents)
+
+			curDone, nextDone = nextDone, make(chan struct{})
+			launchNextRun = false
+
+			reset, dirtyAccounts = nil, nil
+			queuedEvents = make(map[common.Address]types.Transactions)
+		}
+
+		select {
+		case req := <-pool.reqResetCh:
+			// Coalesce: latest newHead wins.
+			if reset == nil {
+				reset = req
+			} else {
+				reset.newHead = req.newHead
+			}
+			launchNextRun = true
+			pool.reorgDoneCh <- nextDone
+
+		case req := <-pool.reqPromoteCh:
+			// Coalesce: dirty-account sets accumulate.
+			if dirtyAccounts == nil {
+				dirtyAccounts = req
+			} else {
+				dirtyAccounts.merge(req)
+			}
+			launchNextRun = true
+			pool.reorgDoneCh <- nextDone
+
+		case tx := <-pool.queueTxEventCh:
+			// Site A: accumulate the tx into the next event payload. Does not
+			// itself trigger a run — relies on a subsequent reset/promote.
+			if addr, err := types.Sender(pool.signer, tx); err == nil {
+				queuedEvents[addr] = append(queuedEvents[addr], tx)
+			}
+
+		case <-curDone:
+			curDone = nil
+
+		case <-pool.reorgShutdownCh:
+			// Wait for any in-flight runReorg to finish before returning so
+			// callers blocked on its done channel can unblock.
+			if curDone != nil {
+				<-curDone
+			}
+			close(nextDone)
+			return
+		}
+	}
+}
+
+// runReorg performs the actual reset / promote work off the scheduling loop
+// and emits a single coalesced NewTxsEvent for the combined promoted set and
+// any queued Site-A events.
+func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, dirtyAccounts *accountSet, queuedEvents map[common.Address]types.Transactions) {
+	defer close(done)
+
+	var (
+		promoted     types.Transactions
+		promoteAddrs []common.Address
+	)
+	if dirtyAccounts != nil && reset == nil {
+		promoteAddrs = dirtyAccounts.flatten()
+	}
+
+	pool.mu.Lock()
+	if reset != nil {
+		// pool.reset performs demote + reinject + full-queue promote and returns
+		// the promoted slice from its inner promoteExecutables(nil) call.
+		promoted = pool.reset(reset.oldHead, reset.newHead)
+	} else {
+		promoted = pool.promoteExecutables(promoteAddrs)
+	}
+	pool.publishPendingSnapshotLocked()
+	pool.mu.Unlock()
+
+	// Build the event payload from promoted txs plus any Site-A queued events.
+	txs := promoted
+	for _, set := range queuedEvents {
+		txs = append(txs, set...)
+	}
+	if len(txs) > 0 {
+		pool.txFeed.Send(NewTxsEvent{Txs: txs})
+	}
 }
