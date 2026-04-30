@@ -57,8 +57,9 @@ const (
 
 	// maxQueuedTxs is the maximum number of transaction lists to queue up before
 	// dropping broadcasts. This is a sensitive number as a transaction list might
-	// contain a single transaction, or thousands.
-	maxQueuedTxs = 128
+	// contain a single transaction, or thousands. Sized to absorb broadcast bursts
+	// (e.g. coalesced reorg events) without dropping batches on slow peers.
+	maxQueuedTxs = 4096
 
 	// maxQueuedProps is the maximum number of block propagations to queue up before
 	// dropping broadcasts. There's not much point in queueing stale blocks, so a few
@@ -303,8 +304,10 @@ func newKnownBlockCache() common.Cache {
 }
 
 // newKnownTxCache returns an empty cache for knownTxsCache.
+// LRU keeps the actively-propagating tx working set hot, avoiding redundant
+// resends to peers that already acknowledged a hash.
 func newKnownTxCache() common.Cache {
-	return common.NewCache(common.FIFOCacheConfig{CacheSize: maxKnownTxs, IsScaled: true})
+	return common.NewCache(common.LRUConfig{CacheSize: maxKnownTxs, IsScaled: true})
 }
 
 // newKnownBidCache returns an empty cache for knownBidsCache.
