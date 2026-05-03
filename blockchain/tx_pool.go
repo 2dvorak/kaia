@@ -549,7 +549,7 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 	// pool.mu.Lock()
 	// defer pool.mu.Unlock()
 
-	pool.addTxsLocked(reinject, false)
+	pool.addTxsLocked(reinject, false, pool.rules)
 
 	// validate the pool of pending transactions, this will remove
 	// any transactions that have been included in the block or
@@ -830,27 +830,40 @@ func (pool *TxPool) local() map[common.Address]types.Transactions {
 // validateTx checks whether a transaction is valid according to the consensus
 // rules and adheres to some heuristic limits of the local node (price and size).
 func (pool *TxPool) validateTx(tx *types.Transaction) error {
+	start := time.Now()
+	defer func() { validateTxTimer.Update(time.Since(start)) }()
+	if err := pool.validateTxBasics(tx, pool.rules); err != nil {
+		return err
+	}
+	return pool.validateTxState(tx)
+}
+
+// validateTxBasics performs all stateless validation of a tx (consensus type
+// gating, init-code/size/gas-limit/chain-id checks, dynamic-fee shape, data
+// size, negative value). It reads only the supplied fork rules and the
+// immutable pool.chainconfig, so it is safe to call without holding pool.mu.
+func (pool *TxPool) validateTxBasics(tx *types.Transaction, rules params.Rules) error {
 	// Accept only legacy transactions until EIP-2718/2930 activates.
-	if !pool.rules.IsEthTxType && tx.IsEthTypedTransaction() {
+	if !rules.IsEthTxType && tx.IsEthTypedTransaction() {
 		return ErrTxTypeNotSupported
 	}
 	// Reject dynamic fee transactions until EIP-1559 activates.
-	if !pool.rules.IsEthTxType && tx.Type() == types.TxTypeEthereumDynamicFee {
+	if !rules.IsEthTxType && tx.Type() == types.TxTypeEthereumDynamicFee {
 		return ErrTxTypeNotSupported
 	}
 
 	// Reject set code transactions until EIP-7600(prague) activates.
-	if !pool.rules.IsPrague && tx.Type() == types.TxTypeEthereumSetCode {
+	if !rules.IsPrague && tx.Type() == types.TxTypeEthereumSetCode {
 		return ErrTxTypeNotSupported
 	}
 
 	// Reject blob transactions until EIP-7607(osaka) activates.
-	if !pool.rules.IsOsaka && tx.Type() == types.TxTypeEthereumBlob {
+	if !rules.IsOsaka && tx.Type() == types.TxTypeEthereumBlob {
 		return ErrTxTypeNotSupported
 	}
 
 	// Check whether the init code size has been exceeded
-	if pool.rules.IsShanghai && tx.To() == nil && len(tx.Data()) > params.MaxInitCodeSize {
+	if rules.IsShanghai && tx.To() == nil && len(tx.Data()) > params.MaxInitCodeSize {
 		return fmt.Errorf("%w: code size %v, limit %v", ErrMaxInitCodeSizeExceeded, len(tx.Data()), params.MaxInitCodeSize)
 	}
 
@@ -864,23 +877,49 @@ func (pool *TxPool) validateTx(tx *types.Transaction) error {
 		return ErrInvalidChainId
 	}
 
-	// NOTE-Kaia Drop transactions with unexpected gasPrice
-	// If the transaction type is DynamicFee tx, Compare transaction's GasFeeCap(MaxFeePerGas) and GasTipCap with tx pool's gasPrice to check to have same value.
+	// Dynamic-fee shape checks. The pool-gasPrice / Magma comparison lives in
+	// validateTxState; only stateless shape rules belong here.
 	if tx.Type() == types.TxTypeEthereumDynamicFee || tx.Type() == types.TxTypeEthereumSetCode {
-		// Sanity check for extremely large numbers
 		if tx.GasTipCap().BitLen() > 256 {
 			return ErrTipVeryHigh
 		}
-
 		if tx.GasFeeCap().BitLen() > 256 {
 			return ErrFeeCapVeryHigh
 		}
-
 		// Ensure gasFeeCap is greater than or equal to gasTipCap.
 		if tx.GasFeeCap().Cmp(tx.GasTipCap()) < 0 {
 			return ErrTipAboveFeeCap
 		}
+	}
 
+	// Reject transactions over MaxTxDataSize to prevent DOS attacks
+	// Note: Sidecar are not included in the size calculation.
+	// Sidecar-specific validation must be done elsewhere.
+	if uint64(tx.SizeWithoutBlobTxSidecar()) > MaxTxDataSize {
+		return ErrOversizedData
+	}
+
+	// Transactions can't be negative. This may never happen using RLP decoded
+	// transactions but may occur if you create a transaction using the RPC.
+	if tx.Value().Sign() < 0 {
+		return ErrNegativeValue
+	}
+
+	return nil
+}
+
+// validateTxState performs all state-aware validation of a tx: pool-gasPrice
+// and Magma fee semantics, sender signature/nonce, balance (including
+// fee-delegation paths), intrinsic-gas and floor-data-gas, type-specific
+// blob/set-code/auth checks, and tx.Validate() against the current state.
+//
+// Caller must hold pool.mu (read or write); this function reads pool.gasPrice,
+// pool.rules, pool.signer, pool.currentState, pool.currentBlockNumber and
+// pool.modules.
+func (pool *TxPool) validateTxState(tx *types.Transaction) error {
+	// NOTE-Kaia Drop transactions with unexpected gasPrice
+	// If the transaction type is DynamicFee tx, Compare transaction's GasFeeCap(MaxFeePerGas) and GasTipCap with tx pool's gasPrice to check to have same value.
+	if tx.Type() == types.TxTypeEthereumDynamicFee || tx.Type() == types.TxTypeEthereumSetCode {
 		if pool.rules.IsMagma {
 			// Ensure transaction's gasFeeCap is greater than or equal to transaction pool's gasPrice(baseFee).
 			if pool.gasPrice.Cmp(tx.GasFeeCap()) > 0 {
@@ -914,19 +953,6 @@ func (pool *TxPool) validateTx(tx *types.Transaction) error {
 				return ErrInvalidUnitPrice
 			}
 		}
-	}
-
-	// Reject transactions over MaxTxDataSize to prevent DOS attacks
-	// Note: Sidecar are not included in the size calculation.
-	// Sidecar-specific validation must be done elsewhere.
-	if uint64(tx.SizeWithoutBlobTxSidecar()) > MaxTxDataSize {
-		return ErrOversizedData
-	}
-
-	// Transactions can't be negative. This may never happen using RLP decoded
-	// transactions but may occur if you create a transaction using the RPC.
-	if tx.Value().Sign() < 0 {
-		return ErrNegativeValue
 	}
 
 	// Make sure the transaction is signed properly
@@ -1574,6 +1600,14 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 	_ = tx.Hash()
 	_ = tx.Size()
 
+	pool.mu.RLock()
+	rules := pool.rules
+	pool.mu.RUnlock()
+	if err := pool.validateTxBasics(tx, rules); err != nil {
+		invalidTxCounter.Inc(1)
+		return err
+	}
+
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 	defer pool.publishPendingSnapshotLocked()
@@ -1595,22 +1629,32 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 func (pool *TxPool) addTxs(txs []*types.Transaction, local bool) []error {
 	senderCacher.recover(pool.signer, txs)
 
+	pool.mu.RLock()
+	rules := pool.rules
+	pool.mu.RUnlock()
+
+	lockStart := time.Now()
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
-	errs := pool.addTxsLocked(txs, local)
+	errs := pool.addTxsLocked(txs, local, rules)
 	pool.publishPendingSnapshotLocked()
 	return errs
 }
 
 // addTxsLocked attempts to queue a batch of transactions if they are valid,
 // whilst assuming the transaction pool lock is already held.
-func (pool *TxPool) addTxsLocked(txs []*types.Transaction, local bool) []error {
+func (pool *TxPool) addTxsLocked(txs []*types.Transaction, local bool, rules params.Rules) []error {
 	// Add the batch of transaction, tracking the accepted ones
 	dirty := make(map[common.Address]struct{})
 	errs := make([]error, len(txs))
 
 	for i, tx := range txs {
+		if err := pool.validateTxBasics(tx, rules); err != nil {
+			errs[i] = err
+			invalidTxCounter.Inc(1)
+			continue
+		}
 		var replace bool
 		if replace, errs[i] = pool.add(tx, local); errs[i] == nil {
 			if !replace {
