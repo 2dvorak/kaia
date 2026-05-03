@@ -280,7 +280,6 @@ type TxPool struct {
 	// scheduleReorgLoop coordinates reset/promote work and event emission off
 	// the ingest hot path, coalescing concurrent requests into a single reorg.
 	reqResetCh      chan *txpoolResetRequest
-	reqPromoteCh    chan *accountSet
 	queueTxEventCh  chan *types.Transaction
 	reorgDoneCh     chan chan struct{}
 	reorgShutdownCh chan struct{}
@@ -332,8 +331,7 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 		blobBaseFee:           new(big.Int).SetUint64(params.ZeroBaseFee),
 		txMsgCh:               make(chan types.Transactions, txMsgChSize),
 		reqResetCh:            make(chan *txpoolResetRequest),
-		reqPromoteCh:          make(chan *accountSet),
-		queueTxEventCh:        make(chan *types.Transaction),
+		queueTxEventCh:        make(chan *types.Transaction, 128),
 		reorgDoneCh:           make(chan chan struct{}),
 		reorgShutdownCh:       make(chan struct{}),
 		missingBlobSidecarsCh: make(chan *MissingBlobSidecar, missingBlobSidecarsChSize),
@@ -343,9 +341,9 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 	pool.priced = newTxPricedList(pool.all)
 	pool.reset(nil, chain.CurrentBlock().Header())
 
-	// scheduleReorgLoop must be running before any path that calls
-	// requestPromoteExecutables (e.g. journal.load → AddLocals → addTx) to
-	// avoid the requester blocking on reqPromoteCh forever.
+	// scheduleReorgLoop coordinates chain-head reset coalescing and queued
+	// Site-A events; start it before any path that may emit such events
+	// (e.g. journal.load → AddLocals → addTx).
 	pool.wg.Add(1)
 	go pool.scheduleReorgLoop()
 
@@ -657,7 +655,7 @@ func (pool *TxPool) Stop() {
 	// Unsubscribe subscriptions registered from blockchain
 	pool.chainHeadSub.Unsubscribe()
 	// Signal scheduleReorgLoop to drain and exit so any goroutines blocked on
-	// requestReset / requestPromoteExecutables / queueTxEvent unblock cleanly.
+	// requestReset / queueTxEvent unblock cleanly.
 	close(pool.reorgShutdownCh)
 	pool.wg.Wait()
 
@@ -1645,20 +1643,21 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 
 	pool.mu.Lock()
 	replace, err := pool.add(tx, local)
+	var promoted types.Transactions
+	if err == nil && !replace {
+		from, _ := types.Sender(pool.signer, tx)
+		promoted = types.Transactions(pool.promoteExecutables([]common.Address{from}))
+	}
+	if err == nil {
+		pool.publishPendingSnapshotLocked()
+	}
 	pool.mu.Unlock()
 	if err != nil {
 		return err
 	}
-
-	// Always request a reorg run: when replace is true the inserted tx already
-	// landed in pending and was queued via Site A (queueTxEvent); the request
-	// simply ensures the next runReorg flushes the queued event. When replace
-	// is false the dirty set carries the sender so promote runs for it.
-	dirty := newAccountSet(pool.signer)
-	if !replace {
-		dirty.addTx(tx)
+	if len(promoted) > 0 {
+		pool.txFeed.Send(NewTxsEvent{Txs: promoted})
 	}
-	<-pool.requestPromoteExecutables(dirty)
 	return nil
 }
 
@@ -1679,11 +1678,16 @@ func (pool *TxPool) addTxs(txs []*types.Transaction, local bool) []error {
 	pool.mu.Lock()
 	addTxsLockWaitTimer.Update(time.Since(lockStart))
 	dirty, addErrs := pool.addTxsLocked(txs, local, rules)
+	var promoted types.Transactions
+	if !dirty.empty() {
+		promoted = types.Transactions(pool.promoteExecutables(dirty.flatten()))
+	}
+	pool.publishPendingSnapshotLocked()
 	pool.mu.Unlock()
 	copy(errs, addErrs)
 
-	if dirty != nil && !dirty.empty() {
-		<-pool.requestPromoteExecutables(dirty)
+	if len(promoted) > 0 {
+		pool.txFeed.Send(NewTxsEvent{Txs: promoted})
 	}
 	return errs
 }
@@ -1692,8 +1696,8 @@ func (pool *TxPool) addTxs(txs []*types.Transaction, local bool) []error {
 // whilst assuming the transaction pool lock is already held. It returns the
 // set of dirty senders (non-replacement adds) and the per-tx error slice.
 //
-// Promotion is the caller's responsibility (typically via
-// requestPromoteExecutables on the returned dirty set), so this function never
+// Promotion is the caller's responsibility (typically by calling
+// promoteExecutables on the returned dirty set), so this function never
 // fires events directly.
 func (pool *TxPool) addTxsLocked(txs []*types.Transaction, local bool, rules params.Rules) (*accountSet, []error) {
 	dirty := newAccountSet(pool.signer)
@@ -2486,17 +2490,6 @@ func (pool *TxPool) requestReset(oldHead, newHead *types.Header) chan struct{} {
 	}
 }
 
-// requestPromoteExecutables hands a dirty-account set to scheduleReorgLoop and
-// returns the channel that closes when the resulting runReorg has finished.
-func (pool *TxPool) requestPromoteExecutables(set *accountSet) chan struct{} {
-	select {
-	case pool.reqPromoteCh <- set:
-		return <-pool.reorgDoneCh
-	case <-pool.reorgShutdownCh:
-		return pool.reorgShutdownCh
-	}
-}
-
 // queueTxEvent enqueues a transaction event to be sent on the next runReorg.
 // This is the Site A path (replacement-into-pending) where the tx already
 // landed in pending and just needs to be announced.
@@ -2518,19 +2511,18 @@ func (pool *TxPool) scheduleReorgLoop() {
 		nextDone      = make(chan struct{})
 		launchNextRun bool
 		reset         *txpoolResetRequest
-		dirtyAccounts *accountSet
 		queuedEvents  = make(map[common.Address]types.Transactions)
 	)
 
 	for {
 		// Launch the next runReorg if there is queued work and none is in flight.
 		if curDone == nil && launchNextRun {
-			go pool.runReorg(nextDone, reset, dirtyAccounts, queuedEvents)
+			go pool.runReorg(nextDone, reset, queuedEvents)
 
 			curDone, nextDone = nextDone, make(chan struct{})
 			launchNextRun = false
 
-			reset, dirtyAccounts = nil, nil
+			reset = nil
 			queuedEvents = make(map[common.Address]types.Transactions)
 		}
 
@@ -2541,16 +2533,6 @@ func (pool *TxPool) scheduleReorgLoop() {
 				reset = req
 			} else {
 				reset.newHead = req.newHead
-			}
-			launchNextRun = true
-			pool.reorgDoneCh <- nextDone
-
-		case req := <-pool.reqPromoteCh:
-			// Coalesce: dirty-account sets accumulate.
-			if dirtyAccounts == nil {
-				dirtyAccounts = req
-			} else {
-				dirtyAccounts.merge(req)
 			}
 			launchNextRun = true
 			pool.reorgDoneCh <- nextDone
@@ -2580,24 +2562,13 @@ func (pool *TxPool) scheduleReorgLoop() {
 // runReorg performs the actual reset / promote work off the scheduling loop
 // and emits a single coalesced NewTxsEvent for the combined promoted set and
 // any queued Site-A events.
-func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, dirtyAccounts *accountSet, queuedEvents map[common.Address]types.Transactions) {
+func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, queuedEvents map[common.Address]types.Transactions) {
 	defer close(done)
 
-	var (
-		promoted     types.Transactions
-		promoteAddrs []common.Address
-	)
-	if dirtyAccounts != nil && reset == nil {
-		promoteAddrs = dirtyAccounts.flatten()
-	}
-
+	var promoted types.Transactions
 	pool.mu.Lock()
 	if reset != nil {
-		// pool.reset performs demote + reinject + full-queue promote and returns
-		// the promoted slice from its inner promoteExecutables(nil) call.
 		promoted = pool.reset(reset.oldHead, reset.newHead)
-	} else {
-		promoted = pool.promoteExecutables(promoteAddrs)
 	}
 	pool.publishPendingSnapshotLocked()
 	pool.mu.Unlock()
