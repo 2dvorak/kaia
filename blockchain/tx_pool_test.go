@@ -36,6 +36,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -638,6 +639,166 @@ func TestInvalidTransactionsMagma(t *testing.T) {
 	}
 	if err := pool.AddLocal(tx); err != ErrGasPriceBelowBaseFee {
 		t.Error("expected", ErrGasPriceBelowBaseFee, "got", err)
+	}
+}
+
+// TestValidateTxSplit covers the split of validateTx into validateTxBasics
+// (stateless, callable without pool.mu) and validateTxState (state-aware,
+// requires pool.mu). It pins the contract that:
+//   - stateless violations (e.g. oversized data) are caught by basics alone;
+//   - state-aware violations (e.g. wrong gasPrice for pool baseFee) pass basics
+//     and are caught only by validateTxState;
+//   - the legacy validateTx wrapper still surfaces both.
+func TestValidateTxSplit(t *testing.T) {
+	t.Parallel()
+
+	pool, key := setupTxPool()
+	defer pool.Stop()
+
+	rules := pool.rules
+
+	// (A) Stateless-invalid: oversized data must be rejected by basics alone.
+	oversized := pricedDataTransaction(0, 1000000, pool.gasPrice, key, MaxTxDataSize+1)
+	if err := pool.validateTxBasics(oversized, rules); err != ErrOversizedData {
+		t.Errorf("validateTxBasics(oversized): expected ErrOversizedData, got %v", err)
+	}
+
+	// (B) Stateless-valid but state-invalid: wrong gasPrice for the pool.
+	// Basics must pass; validateTxState must reject.
+	pool.SetBaseFee(big.NewInt(1000))
+	wrongPrice := pricedTransaction(0, 100000, big.NewInt(1), key)
+	if err := pool.validateTxBasics(wrongPrice, rules); err != nil {
+		t.Errorf("validateTxBasics(wrong-price): expected nil (stateless ok), got %v", err)
+	}
+	pool.mu.Lock()
+	stateErr := pool.validateTxState(wrongPrice)
+	pool.mu.Unlock()
+	if stateErr != ErrGasPriceBelowBaseFee {
+		t.Errorf("validateTxState(wrong-price): expected ErrGasPriceBelowBaseFee, got %v", stateErr)
+	}
+
+	// (C) Legacy validateTx wrapper must still catch both kinds.
+	pool.mu.Lock()
+	wrapErrOver := pool.validateTx(oversized)
+	wrapErrPrice := pool.validateTx(wrongPrice)
+	pool.mu.Unlock()
+	if wrapErrOver != ErrOversizedData {
+		t.Errorf("validateTx(oversized): expected ErrOversizedData, got %v", wrapErrOver)
+	}
+	if wrapErrPrice != ErrGasPriceBelowBaseFee {
+		t.Errorf("validateTx(wrong-price): expected ErrGasPriceBelowBaseFee, got %v", wrapErrPrice)
+	}
+}
+
+// TestTxPoolReorgCoalescesUnderBurst pins the Phase-3 invariant that concurrent
+// AddRemote calls coalesce promote work into fewer NewTxsEvent emissions than
+// the number of incoming txs. Pre-Phase-3 this would deliver exactly N events;
+// after the coalesced reorg loop is wired up, multiple promotions running while
+// a runReorg is in flight share its successor.
+func TestTxPoolReorgCoalescesUnderBurst(t *testing.T) {
+	t.Parallel()
+
+	pool, _ := setupTxPool()
+	defer pool.Stop()
+
+	const N = 50
+	keys := make([]*ecdsa.PrivateKey, N)
+	txs := make([]*types.Transaction, N)
+	for i := 0; i < N; i++ {
+		keys[i], _ = crypto.GenerateKey()
+		addr := crypto.PubkeyToAddress(keys[i].PublicKey)
+		testAddBalance(pool, addr, new(big.Int).SetUint64(params.KAIA))
+		txs[i] = pricedTransaction(0, 100000, pool.gasPrice, keys[i])
+	}
+
+	txCh := make(chan NewTxsEvent, N*2)
+	sub := pool.SubscribeNewTxsEvent(txCh)
+	defer sub.Unsubscribe()
+
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func(tx *types.Transaction) {
+			defer wg.Done()
+			if err := pool.AddRemote(tx); err != nil {
+				t.Errorf("AddRemote: %v", err)
+			}
+		}(txs[i])
+	}
+	wg.Wait()
+
+	// Drain whatever events arrived. AddRemote already blocked on its
+	// runReorg's done channel, so by here every accepted tx is in some event.
+	deadline := time.NewTimer(500 * time.Millisecond)
+	defer deadline.Stop()
+	var (
+		events   int
+		txsSeen  int
+		flushing = true
+	)
+	for flushing {
+		select {
+		case ev := <-txCh:
+			events++
+			txsSeen += len(ev.Txs)
+		case <-deadline.C:
+			flushing = false
+		}
+	}
+
+	if txsSeen != N {
+		t.Errorf("expected %d txs across events, got %d (events=%d)", N, txsSeen, events)
+	}
+	if events == 0 {
+		t.Errorf("expected at least one event for %d txs, got 0", N)
+	}
+	t.Logf("event count: %d events for %d txs", events, N)
+}
+
+// preAddTxRecorder is a tiny kaiax.TxPoolModule stub that records every
+// PreAddTx invocation. It exists so we can assert the kaiax module hook stays
+// wired through the Phase-3 ingest restructuring.
+type preAddTxRecorder struct {
+	preAddTxCalls int32
+}
+
+func (r *preAddTxRecorder) PreAddTx(tx *types.Transaction, local bool) error {
+	atomic.AddInt32(&r.preAddTxCalls, 1)
+	return nil
+}
+func (r *preAddTxRecorder) IsModuleTx(tx *types.Transaction) bool                      { return true }
+func (r *preAddTxRecorder) GetCheckBalance() func(*types.Transaction) error            { return nil }
+func (r *preAddTxRecorder) IsReady(map[uint64]*types.Transaction, uint64, types.Transactions) bool {
+	return true
+}
+func (r *preAddTxRecorder) PreReset(*types.Header, *types.Header) []common.Hash { return nil }
+func (r *preAddTxRecorder) PostReset(*types.Header, *types.Header, map[common.Address]types.Transactions, map[common.Address]types.Transactions) {
+}
+
+// TestTxPoolPreAddTxModuleHook is a regression guard for the kaiax module
+// integration: PreAddTx must still fire on the add path after Phase 3 moves
+// validation out of the lock.
+func TestTxPoolPreAddTxModuleHook(t *testing.T) {
+	t.Parallel()
+
+	pool, key := setupTxPool()
+	defer pool.Stop()
+
+	rec := &preAddTxRecorder{}
+	pool.RegisterTxPoolModule(rec)
+
+	var _ kaiax.TxPoolModule = rec // compile-time interface conformance
+
+	addr := crypto.PubkeyToAddress(key.PublicKey)
+	testAddBalance(pool, addr, new(big.Int).SetUint64(params.KAIA))
+	tx := pricedTransaction(0, 100000, pool.gasPrice, key)
+
+	if err := pool.AddRemote(tx); err != nil {
+		t.Fatalf("AddRemote: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&rec.preAddTxCalls); got == 0 {
+		t.Errorf("PreAddTx not called; expected >=1")
 	}
 }
 
@@ -4486,100 +4647,5 @@ func TestPendingSnapshotPublishedOnEarlyResetReturn(t *testing.T) {
 	snap := pool.PendingSnapshot()
 	if len(snap) != 0 {
 		t.Fatalf("expected snapshot to be empty after early reset return, got %d accounts", len(snap))
-	}
-}
-
-// TestValidateTxSplit covers the split of validateTx into validateTxBasics
-// (stateless, callable without pool.mu) and validateTxState (state-aware,
-// requires pool.mu). It pins the contract that:
-//   - stateless violations (e.g. oversized data) are caught by basics alone;
-//   - state-aware violations (e.g. wrong gasPrice for pool baseFee) pass basics
-//     and are caught only by validateTxState;
-//   - the legacy validateTx wrapper still surfaces both.
-func TestValidateTxSplit(t *testing.T) {
-	t.Parallel()
-
-	pool, key := setupTxPool()
-	defer pool.Stop()
-
-	rules := pool.rules
-
-	// (A) Stateless-invalid: oversized data must be rejected by basics alone.
-	oversized := pricedDataTransaction(0, 1000000, pool.gasPrice, key, MaxTxDataSize+1)
-	if err := pool.validateTxBasics(oversized, rules); err != ErrOversizedData {
-		t.Errorf("validateTxBasics(oversized): expected ErrOversizedData, got %v", err)
-	}
-
-	// (B) Stateless-valid but state-invalid: wrong gasPrice for the pool.
-	// Basics must pass; validateTxState must reject.
-	pool.SetBaseFee(big.NewInt(1000))
-	wrongPrice := pricedTransaction(0, 100000, big.NewInt(1), key)
-	if err := pool.validateTxBasics(wrongPrice, rules); err != nil {
-		t.Errorf("validateTxBasics(wrong-price): expected nil (stateless ok), got %v", err)
-	}
-	pool.mu.Lock()
-	stateErr := pool.validateTxState(wrongPrice)
-	pool.mu.Unlock()
-	if stateErr != ErrGasPriceBelowBaseFee {
-		t.Errorf("validateTxState(wrong-price): expected ErrGasPriceBelowBaseFee, got %v", stateErr)
-	}
-
-	// (C) Legacy validateTx wrapper must still catch both kinds.
-	pool.mu.Lock()
-	wrapErrOver := pool.validateTx(oversized)
-	wrapErrPrice := pool.validateTx(wrongPrice)
-	pool.mu.Unlock()
-	if wrapErrOver != ErrOversizedData {
-		t.Errorf("validateTx(oversized): expected ErrOversizedData, got %v", wrapErrOver)
-	}
-	if wrapErrPrice != ErrGasPriceBelowBaseFee {
-		t.Errorf("validateTx(wrong-price): expected ErrGasPriceBelowBaseFee, got %v", wrapErrPrice)
-	}
-}
-
-// preAddTxRecorder is a tiny kaiax.TxPoolModule stub that records every
-// PreAddTx invocation. It exists so we can assert the kaiax module hook stays
-// wired through the ingest restructuring.
-type preAddTxRecorder struct {
-	preAddTxCalls int32
-}
-
-func (r *preAddTxRecorder) PreAddTx(tx *types.Transaction, local bool) error {
-	atomic.AddInt32(&r.preAddTxCalls, 1)
-	return nil
-}
-func (r *preAddTxRecorder) IsModuleTx(tx *types.Transaction) bool                      { return true }
-func (r *preAddTxRecorder) GetCheckBalance() func(*types.Transaction) error            { return nil }
-func (r *preAddTxRecorder) IsReady(map[uint64]*types.Transaction, uint64, types.Transactions) bool {
-	return true
-}
-func (r *preAddTxRecorder) PreReset(*types.Header, *types.Header) []common.Hash { return nil }
-func (r *preAddTxRecorder) PostReset(*types.Header, *types.Header, map[common.Address]types.Transactions, map[common.Address]types.Transactions) {
-}
-
-// TestTxPoolPreAddTxModuleHook is a regression guard for the kaiax module
-// integration: PreAddTx must still fire on the add path after validation is
-// split out of the lock.
-func TestTxPoolPreAddTxModuleHook(t *testing.T) {
-	t.Parallel()
-
-	pool, key := setupTxPool()
-	defer pool.Stop()
-
-	rec := &preAddTxRecorder{}
-	pool.RegisterTxPoolModule(rec)
-
-	var _ kaiax.TxPoolModule = rec // compile-time interface conformance
-
-	addr := crypto.PubkeyToAddress(key.PublicKey)
-	testAddBalance(pool, addr, new(big.Int).SetUint64(params.KAIA))
-	tx := pricedTransaction(0, 100000, pool.gasPrice, key)
-
-	if err := pool.AddRemote(tx); err != nil {
-		t.Fatalf("AddRemote: %v", err)
-	}
-
-	if got := atomic.LoadInt32(&rec.preAddTxCalls); got == 0 {
-		t.Errorf("PreAddTx not called; expected >=1")
 	}
 }
