@@ -1548,12 +1548,23 @@ func (pool *TxPool) StopSpamThrottler() {
 }
 
 // handleTxMsg calls TxPool.AddRemotes by retrieving transactions from TxPool.txMsgCh.
+// It drains all buffered batches before each AddRemotes call to coalesce multiple
+// P2P deliveries into a single publishPendingSnapshotLocked rebuild.
 func (pool *TxPool) handleTxMsg() {
 	defer pool.wg.Done()
 
 	for {
 		select {
 		case txs := <-pool.txMsgCh:
+		drain:
+			for {
+				select {
+				case more := <-pool.txMsgCh:
+					txs = append(txs, more...)
+				default:
+					break drain
+				}
+			}
 			pool.AddRemotes(txs)
 		case <-pool.chainHeadSub.Err():
 			return
