@@ -70,6 +70,10 @@ const (
 	txFeedChSize = 100
 	// missingBlobSidecarsChSize is the number of missing blob sidecars can be queued for event feed.
 	missingBlobSidecarsChSize = 100
+	// localSubmitChSize is the capacity of the async local-tx submission channel.
+	// Sized to absorb burst injection from many concurrent RPC callers so they
+	// return immediately instead of blocking on pool.mu.Lock.
+	localSubmitChSize = 100_000
 )
 
 var (
@@ -200,9 +204,9 @@ var DefaultTxPoolConfig = TxPoolConfig{
 	PriceBump:  10,
 
 	ExecSlotsAccount:    16,
-	ExecSlotsAll:        4096,
+	ExecSlotsAll:        200000,
 	NonExecSlotsAccount: 64,
-	NonExecSlotsAll:     1024,
+	NonExecSlotsAll:     20000,
 
 	KeepLocals: false,
 	Lifetime:   5 * time.Minute,
@@ -275,8 +279,9 @@ type TxPool struct {
 
 	wg sync.WaitGroup // for shutdown sync
 
-	txMsgCh  chan types.Transactions // A buffer for async tx intake via AddRemotes
-	txFeedCh chan types.Transactions // A buffer for async tx event emission via txFeed
+	txMsgCh       chan types.Transactions   // A buffer for async tx intake via AddRemotes
+	txFeedCh      chan types.Transactions   // A buffer for async tx event emission via txFeed
+	localSubmitCh chan *types.Transaction   // A buffer for async local tx submission from RPC
 
 	missingBlobSidecarsCh chan *MissingBlobSidecar // A buffer for async missing blob sidecars event emission
 
@@ -325,6 +330,7 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 		blobBaseFee:           new(big.Int).SetUint64(params.ZeroBaseFee),
 		txMsgCh:               make(chan types.Transactions, txMsgChSize),
 		txFeedCh:              make(chan types.Transactions, txFeedChSize),
+		localSubmitCh:         make(chan *types.Transaction, localSubmitChSize),
 		missingBlobSidecarsCh: make(chan *MissingBlobSidecar, missingBlobSidecarsChSize),
 		govModule:             govModule,
 	}
@@ -352,10 +358,11 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 	}
 
 	// Start the event loop and return
-	pool.wg.Add(3)
+	pool.wg.Add(4)
 	go pool.loop()
 	go pool.handleTxMsg()
 	go pool.handleTxFeed()
+	go pool.handleLocalSubmit()
 
 	if config.EnableSpamThrottlerAtRuntime {
 		if err := pool.StartSpamThrottler(DefaultSpamThrottlerConfig); err != nil {
@@ -1550,21 +1557,66 @@ func (pool *TxPool) handleTxFeed() {
 	}
 }
 
+// handleLocalSubmit drains localSubmitCh in batches and calls addTxs so that
+// concurrent RPC callers (AddLocal) never contend on pool.mu.Lock. Each batch
+// is processed under a single lock acquisition via addTxs.
+func (pool *TxPool) handleLocalSubmit() {
+	defer pool.wg.Done()
+
+	const maxBatch = 256
+	batch := make([]*types.Transaction, 0, maxBatch)
+
+	for {
+		// Block until at least one tx is ready.
+		select {
+		case tx := <-pool.localSubmitCh:
+			batch = append(batch, tx)
+		case <-pool.chainHeadSub.Err():
+			return
+		}
+		// Drain additional pending txs without blocking (up to maxBatch).
+	drain:
+		for len(batch) < maxBatch {
+			select {
+			case tx := <-pool.localSubmitCh:
+				batch = append(batch, tx)
+			default:
+				break drain
+			}
+		}
+		pool.addTxs(batch, !pool.config.NoLocals)
+		batch = batch[:0]
+	}
+}
+
 // AddLocal enqueues a single transaction into the pool if it is valid, marking
 // the sender as a local one in the mean time, ensuring it goes around the local
 // pricing constraints.
+//
+// The hot path is async: stateless validation runs immediately (no pool.mu
+// contention), then the tx is pushed onto localSubmitCh for a background
+// goroutine to batch-add under pool.mu.Lock. RPC callers return in microseconds
+// instead of blocking for the mutex.
 func (pool *TxPool) AddLocal(tx *types.Transaction) error {
 	if tx.Type().IsChainDataAnchoring() && !pool.config.AllowLocalAnchorTx {
 		return errNotAllowedAnchoringTx
 	}
-
+	cacheSender(pool.signer, tx)
+	_ = tx.Hash()
+	_ = tx.Size()
 	pool.mu.RLock()
-	poolSize := uint64(pool.all.Count())
+	rules := pool.rules
 	pool.mu.RUnlock()
-	if poolSize >= pool.config.ExecSlotsAll+pool.config.NonExecSlotsAll {
-		return fmt.Errorf("txpool is full: %d", poolSize)
+	if err := pool.validateTxBasics(tx, rules); err != nil {
+		invalidTxCounter.Inc(1)
+		return err
 	}
-	return pool.addTx(tx, !pool.config.NoLocals)
+	select {
+	case pool.localSubmitCh <- tx:
+		return nil
+	default:
+		return ErrTxPoolOverflow
+	}
 }
 
 // AddRemote enqueues a single transaction into the pool if it is valid. If the
