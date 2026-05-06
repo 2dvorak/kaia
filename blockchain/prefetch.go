@@ -36,23 +36,30 @@ func PrefetchBlockState(ctx context.Context, stateReader stateAtReader, parentRo
 				return
 			default:
 			}
-			from, err := types.Sender(signer, tx)
-			if err != nil {
-				continue
-			}
-			statedb.Exist(from)
-			to := tx.To()
-			if to == nil {
-				continue
-			}
-			// GetCodeHash already loads the recipient account trie node.
-			if statedb.GetCodeHash(*to) == types.EmptyCodeHash {
-				continue
-			}
-			// Contract call: warm bytecode and touch the zero slot only to force
-			// lazy storage-trie initialization of the root node.
-			statedb.GetCode(*to)
-			statedb.GetState(*to, common.Hash{})
+			prefetchTxState(statedb, signer, tx)
 		}
 	}()
+}
+
+// prefetchTxState warms the trie nodes the real execution will need for one
+// tx without running the EVM: sender account + (for contract calls)
+// recipient bytecode and storage-trie root.
+func prefetchTxState(statedb *state.StateDB, signer types.Signer, tx *types.Transaction) {
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		return
+	}
+	statedb.Exist(from)
+	to := tx.To()
+	if to == nil {
+		return
+	}
+	// GetCodeHash already loads the recipient account trie node.
+	if statedb.GetCodeHash(*to) == types.EmptyCodeHash {
+		return
+	}
+	// Contract call: warm bytecode and touch the zero slot to force lazy
+	// storage-trie root-node initialization.
+	statedb.GetCode(*to)
+	statedb.GetState(*to, common.Hash{})
 }

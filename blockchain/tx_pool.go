@@ -274,8 +274,8 @@ type TxPool struct {
 }
 
 // pendingSnapshot is the immutable payload atomically swapped into
-// TxPool.pendingSnapshot. The per-account slices are full copies owned by the
-// snapshot, so later pool mutations cannot corrupt them.
+// TxPool.pendingSnapshot. Per-account slices are cached nonce-sorted txList
+// views and must be treated as read-only by callers.
 type pendingSnapshot struct {
 	byAddr map[common.Address]types.Transactions
 }
@@ -404,17 +404,16 @@ func (pool *TxPool) loop() {
 				txPoolQueueGauge.Update(int64(queued))
 			}
 
-		// Handle inactive account transaction eviction
+		// Handle inactive account transaction eviction. Eviction never
+		// mutates pool.pending, so the snapshot doesn't need a republish
+		// here — that O(N) work was the dominant cost of this tick.
 		case <-evict.C:
 			pool.mu.Lock()
 			for addr, beat := range pool.beats {
-				// Skip local transactions from the eviction mechanism
 				if pool.config.KeepLocals && pool.locals.contains(addr) {
 					delete(pool.beats, addr)
 					continue
 				}
-
-				// Any non-locals old enough should be removed
 				if time.Since(beat) > pool.config.Lifetime {
 					if pool.queue[addr] != nil {
 						for _, tx := range pool.queue[addr].Flatten() {
@@ -424,7 +423,6 @@ func (pool *TxPool) loop() {
 					delete(pool.beats, addr)
 				}
 			}
-			pool.publishPendingSnapshotLocked()
 			pool.mu.Unlock()
 
 		// Handle local transaction journal rotation
@@ -741,7 +739,7 @@ func (pool *TxPool) publishPendingSnapshotLocked() {
 		byAddr: make(map[common.Address]types.Transactions, len(pool.pending)),
 	}
 	for addr, list := range pool.pending {
-		snap.byAddr[addr] = list.Flatten()
+		snap.byAddr[addr] = list.CachedTxsFlattenByCount(list.Len())
 	}
 	pool.pendingSnapshot.Store(snap)
 }
@@ -749,8 +747,7 @@ func (pool *TxPool) publishPendingSnapshotLocked() {
 // PendingSnapshot returns a lock-free snapshot of pending transactions,
 // shallow-copied into a fresh outer map so downstream consumers that mutate
 // it in place (FilterTransactionWithBaseFee, builder.FilterTxs,
-// NewTransactionsByPriceAndNonce) remain safe. Per-account slices are owned
-// by the snapshot and must be treated as read-only by callers.
+// NewTransactionsByPriceAndNonce) remain safe. Per-account slices are read-only.
 func (pool *TxPool) PendingSnapshot() map[common.Address]types.Transactions {
 	snap := pool.pendingSnapshot.Load()
 	if snap == nil {
@@ -1571,7 +1568,11 @@ func (pool *TxPool) checkAndAddTxs(txs []*types.Transaction, local bool) []error
 
 // addTx enqueues a single transaction into the pool if it is valid.
 func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
-	senderCacher.recover(pool.signer, []*types.Transaction{tx})
+	// Pre-warm tx caches off-lock so validateTx never pays ecrecover/hash
+	// under pool.mu. The async senderCacher loses the lock race for single-tx.
+	cacheSender(pool.signer, tx)
+	_ = tx.Hash()
+	_ = tx.Size()
 
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
