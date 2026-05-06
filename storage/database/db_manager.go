@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/dgraph-io/badger"
 	"github.com/erigontech/erigon-lib/kaiatrie"
@@ -431,6 +432,10 @@ type databaseManager struct {
 	cm     *cacheManager
 	dm     *kaiatrie.DomainsManager
 
+	// pruningState memoizes the persisted pruning flag (0 unread, 1 on,
+	// 2 off) so ReadPruningEnabled skips a leveldb.Has on every state.New.
+	pruningState atomic.Int32
+
 	// TODO-Kaia need to refine below.
 	// -merge status variable
 	lockInMigration      sync.RWMutex
@@ -438,6 +443,12 @@ type databaseManager struct {
 	migrationBlockNumber uint64
 	migrationOldDBPath   string
 }
+
+const (
+	pruningStateUnknown  int32 = 0
+	pruningStateEnabled  int32 = 1
+	pruningStateDisabled int32 = 2
+)
 
 func NewMemoryDBManager() DBManager {
 	dbc := &DBConfig{DBType: MemoryDB}
@@ -2060,8 +2071,17 @@ func (dbm *databaseManager) WritePreimages(number uint64, preimages map[common.H
 }
 
 // ReadPruningEnabled reads if the live pruning flag is stored in database.
+// Memoized via pruningState; only mutates through Write/DeletePruningEnabled.
 func (dbm *databaseManager) ReadPruningEnabled() bool {
+	if v := dbm.pruningState.Load(); v != pruningStateUnknown {
+		return v == pruningStateEnabled
+	}
 	ok, _ := dbm.getDatabase(MiscDB).Has(pruningEnabledKey)
+	state := pruningStateDisabled
+	if ok {
+		state = pruningStateEnabled
+	}
+	dbm.pruningState.Store(state)
 	return ok
 }
 
@@ -2070,6 +2090,7 @@ func (dbm *databaseManager) WritePruningEnabled() {
 	if err := dbm.getDatabase(MiscDB).Put(pruningEnabledKey, []byte("42")); err != nil {
 		logger.Crit("Failed to store pruning enabled flag", "err", err)
 	}
+	dbm.pruningState.Store(pruningStateEnabled)
 }
 
 // DeletePruningEnabled deletes the live pruning flag. It is used only for testing.
@@ -2077,6 +2098,7 @@ func (dbm *databaseManager) DeletePruningEnabled() {
 	if err := dbm.getDatabase(MiscDB).Delete(pruningEnabledKey); err != nil {
 		logger.Crit("Failed to remove pruning enabled flag", "err", err)
 	}
+	dbm.pruningState.Store(pruningStateDisabled)
 }
 
 // WritePruningMarks writes the provided set of pruning marks to the database.
