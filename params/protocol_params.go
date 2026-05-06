@@ -228,7 +228,7 @@ const (
 
 	// DefaultBlockGenerationTxLimit caps how many top-priced transactions a proposer
 	// will inspect during one block-building round.
-	DefaultBlockGenerationTxLimit = 12_000
+	DefaultBlockGenerationTxLimit = 20_000
 
 	// KaiaBFTBlockGenerationTimeLimit is the default tx execution time limit
 	// for kaiabft. Speculative execution lets non-proposers overlap execution
