@@ -1695,13 +1695,15 @@ func (pm *ProtocolManager) minedBroadcastLoop() {
 		case kaia_blockchain.NewMinedBlockEvent:
 			pm.BroadcastBlock(ev.Block)     // First propagate block to peers
 			pm.BroadcastBlockHash(ev.Block) // Only then announce to the rest
-			// Push pending TXs to all CN peers so the next proposer has a full
-			// pool for the next round. Without this, CNs that only receive TXs
-			// via CN-to-CN propagation (not directly from ENs) are starved and
-			// produce near-empty blocks, causing the bimodal 800/12000 pattern.
+			// Force-push pending TXs to all CN peers so the next proposer has a
+			// full pool for the next round. broadcastTxsFromCN skips peers
+			// already in the known-TX set, but those sends may have been silently
+			// dropped from the async queue — so bypass the filter here.
 			if pm.nodetype == common.CONSENSUSNODE {
 				if pending := pm.txpool.CachedPendingTxsByCount(params.BlockGenerationTxLimit); len(pending) > 0 {
-					pm.broadcastTxsFromCN(pending)
+					for _, peer := range pm.peers.CNPeers() {
+						peer.AsyncSendTransactions(pending)
+					}
 				}
 			}
 		}
