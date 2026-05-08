@@ -4349,14 +4349,14 @@ func TestTxPool_saveAndPruneBlobStorage(t *testing.T) {
 	}
 }
 
-// TestPendingSnapshotConsistency verifies that PendingSnapshot() stays in
-// sync with Pending() across every mutation path that is expected to publish
-// the snapshot. A missed publish site would surface here as a divergence.
-func TestPendingSnapshotConsistency(t *testing.T) {
+// TestPendingViewConsistency exercises every public mutation path that can
+// change pool.pending and asserts pool.PendingSnapshot() agrees with
+// pool.Pending() after each. A missed publish site would surface here as a
+// divergence.
+func TestPendingViewConsistency(t *testing.T) {
 	pool, key := setupTxPool()
 	defer pool.Stop()
 
-	// Seed a handful of extra accounts so pending has structure.
 	aux := make([]*ecdsa.PrivateKey, 4)
 	for i := range aux {
 		k, _ := crypto.GenerateKey()
@@ -4364,7 +4364,7 @@ func TestPendingSnapshotConsistency(t *testing.T) {
 		pool.currentState.AddBalance(crypto.PubkeyToAddress(k.PublicKey), new(big.Int).SetUint64(params.KAIA))
 	}
 
-	assertSnapshotMatchesPending := func(t *testing.T, label string) {
+	assertViewMatchesPending := func(t *testing.T, label string) {
 		t.Helper()
 		ref, err := pool.Pending()
 		if err != nil {
@@ -4391,15 +4391,15 @@ func TestPendingSnapshotConsistency(t *testing.T) {
 		}
 	}
 
-	assertSnapshotMatchesPending(t, "empty pool")
+	assertViewMatchesPending(t, "empty pool")
 
-	// Path 1: addTx (single). AddLocal routes through addTx.
+	// addTx single — covers promoteTx publish.
 	if err := pool.AddLocal(transaction(0, 100000, key)); err != nil {
 		t.Fatalf("AddLocal: %v", err)
 	}
-	assertSnapshotMatchesPending(t, "after addTx")
+	assertViewMatchesPending(t, "after addTx")
 
-	// Path 2: addTxs (batch). AddRemotes routes through addTxs.
+	// addTxs batch — covers promoteExecutables publish per addr.
 	batch := make([]*types.Transaction, 0, len(aux)*2)
 	for _, k := range aux {
 		batch = append(batch, transaction(0, 100000, k))
@@ -4412,77 +4412,60 @@ func TestPendingSnapshotConsistency(t *testing.T) {
 			}
 		}
 	}
-	assertSnapshotMatchesPending(t, "after addTxs batch")
+	assertViewMatchesPending(t, "after addTxs batch")
 
-	// Path 3: reset via head change. setNewHead + lockedReset drives reset().
-	assertSnapshotMatchesPending(t, "before reset")
+	// reset — covers demoteUnexecutables + re-promote publishes.
 	pool.lockedReset(nil, nil)
-	assertSnapshotMatchesPending(t, "after reset")
+	assertViewMatchesPending(t, "after reset")
 
-	// Path 4: Clear.
+	// Clear — covers wipe.
 	pool.Clear()
-	assertSnapshotMatchesPending(t, "after Clear")
+	assertViewMatchesPending(t, "after Clear")
 
-	// Snapshot mutation by consumer must not corrupt subsequent reads.
-	// (Outer map is freshly cloned each call; per-account slices are shared
-	// but read-only — simulate a consumer that mutates the map entry.)
+	// Refill, then snapshot mutation by consumer must not corrupt subsequent reads.
 	if err := pool.AddLocal(transaction(0, 100000, key)); err != nil {
 		t.Fatalf("AddLocal post-Clear: %v", err)
 	}
 	consumer := pool.PendingSnapshot()
 	for k := range consumer {
-		delete(consumer, k) // mutate outer map
+		delete(consumer, k)
 	}
-	assertSnapshotMatchesPending(t, "after consumer mutation")
+	assertViewMatchesPending(t, "after consumer mutation")
 }
 
-type dropOnResetModule struct {
-	drop []common.Hash
-}
-
-func (m *dropOnResetModule) PreAddTx(tx *types.Transaction, local bool) error { return nil }
-func (m *dropOnResetModule) IsModuleTx(tx *types.Transaction) bool            { return false }
-func (m *dropOnResetModule) GetCheckBalance() func(tx *types.Transaction) error {
-	return nil
-}
-
-func (m *dropOnResetModule) IsReady(txs map[uint64]*types.Transaction, next uint64, ready types.Transactions) bool {
-	return true
-}
-
-func (m *dropOnResetModule) PreReset(oldHead, newHead *types.Header) []common.Hash {
-	return m.drop
-}
-
-func (m *dropOnResetModule) PostReset(oldHead, newHead *types.Header, queue, pending map[common.Address]types.Transactions) {
-}
-
-func TestPendingSnapshotPublishedOnEarlyResetReturn(t *testing.T) {
+// TestPendingViewReplacementPublishes verifies that the direct pending
+// replacement path in pool.add() (same nonce, higher price) republishes the
+// view. Otherwise, the miner would keep seeing the replaced/canceled tx via
+// PendingSnapshot() until some unrelated mutation refreshes the entry.
+func TestPendingViewReplacementPublishes(t *testing.T) {
 	pool, key := setupTxPool()
 	defer pool.Stop()
 
-	tx := transaction(0, 100000, key)
-	if err := pool.AddLocal(tx); err != nil {
-		t.Fatalf("AddLocal: %v", err)
+	addr := crypto.PubkeyToAddress(key.PublicKey)
+
+	original := pricedTransaction(0, 100000, big.NewInt(1), key)
+	if err := pool.AddLocal(original); err != nil {
+		t.Fatalf("AddLocal original: %v", err)
 	}
-
-	pool.RegisterTxPoolModule(&dropOnResetModule{drop: []common.Hash{tx.Hash()}})
-
-	oldHead := &types.Header{Number: big.NewInt(2), ParentHash: common.HexToHash("0x1")}
-	newHead := &types.Header{Number: big.NewInt(3), ParentHash: common.HexToHash("0x2")}
-
-	pool.lockedReset(oldHead, newHead)
-
-	pending, err := pool.Pending()
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
-	if len(pending) != 0 {
-		t.Fatalf("expected pending to be empty after dropped tx, got %d accounts", len(pending))
-	}
-
 	snap := pool.PendingSnapshot()
-	if len(snap) != 0 {
-		t.Fatalf("expected snapshot to be empty after early reset return, got %d accounts", len(snap))
+	if len(snap[addr]) != 1 || snap[addr][0].Hash() != original.Hash() {
+		t.Fatalf("snapshot did not contain original tx: %+v", snap[addr])
+	}
+
+	// Replace at same nonce with a higher gas price (price-bump satisfied).
+	priceBump := pool.config.PriceBump
+	bumped := big.NewInt(int64(2 + priceBump))
+	replacement := pricedTransaction(0, 100000, bumped, key)
+	if err := pool.AddLocal(replacement); err != nil {
+		t.Fatalf("AddLocal replacement: %v", err)
+	}
+
+	snap = pool.PendingSnapshot()
+	if len(snap[addr]) != 1 {
+		t.Fatalf("expected 1 tx in snapshot, got %d", len(snap[addr]))
+	}
+	if snap[addr][0].Hash() != replacement.Hash() {
+		t.Fatalf("snapshot still shows replaced tx: have %s want %s",
+			snap[addr][0].Hash().Hex(), replacement.Hash().Hex())
 	}
 }

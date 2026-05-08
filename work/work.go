@@ -58,12 +58,13 @@ type TxPool interface {
 	HandleTxMsg(types.Transactions)
 
 	// Pending should return pending transactions.
-	// The slice should be modifiable by the caller. Hot paths such as miner
-	// block building should prefer PendingSnapshot to avoid txpool lock traffic.
+	// The slice should be modifiable by the caller. Hot block-building paths
+	// should prefer PendingSnapshot to avoid pool lock contention.
 	Pending() (map[common.Address]types.Transactions, error)
 
-	// PendingSnapshot returns a lock-free pending snapshot (shallow-copied
-	// outer map). Per-account slices are read-only. Bounded staleness.
+	// PendingSnapshot returns a lock-free, eventually-consistent view of
+	// pending transactions. The outer map is freshly allocated; per-account
+	// slices are aliased and must be treated as read-only.
 	PendingSnapshot() map[common.Address]types.Transactions
 
 	CachedPendingTxsByCount(count int) types.Transactions

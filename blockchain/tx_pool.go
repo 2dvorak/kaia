@@ -30,7 +30,6 @@ import (
 	"slices"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/kaiachain/kaia/blockchain/state"
@@ -267,17 +266,10 @@ type TxPool struct {
 
 	modules []kaiax.TxPoolModule
 
-	// pendingSnapshot is a lock-free, read-only view of `pending` published
-	// via atomic pointer swap by writers. Consumers (miner, speculative exec)
-	// read it without acquiring pool.mu. Staleness ≤ one writer batch.
-	pendingSnapshot atomic.Pointer[pendingSnapshot]
-}
-
-// pendingSnapshot is the immutable payload atomically swapped into
-// TxPool.pendingSnapshot. Per-account slices are cached nonce-sorted txList
-// views and must be treated as read-only by callers.
-type pendingSnapshot struct {
-	byAddr map[common.Address]types.Transactions
+	// pendingView is a lock-free, eventually-consistent mirror of pool.pending.
+	// Writers under pool.mu publish per-account; the miner reads via
+	// PendingSnapshot() without taking pool.mu.
+	pendingView *pendingView
 }
 
 // NewTxPool creates a new transaction pool to gather, sort and filter inbound
@@ -306,6 +298,7 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 		txFeedCh:              make(chan types.Transactions, txFeedChSize),
 		missingBlobSidecarsCh: make(chan *MissingBlobSidecar, missingBlobSidecarsChSize),
 		govModule:             govModule,
+		pendingView:           newPendingView(),
 	}
 	pool.locals = newAccountSet(pool.signer)
 	pool.priced = newTxPricedList(pool.all)
@@ -450,8 +443,6 @@ func (pool *TxPool) lockedReset(oldHead, newHead *types.Header) {
 // reset retrieves the current state of the blockchain and ensures the content
 // of the transaction pool is valid with regard to the chain state.
 func (pool *TxPool) reset(oldHead, newHead *types.Header) {
-	defer pool.publishPendingSnapshotLocked()
-
 	pool.txMu.Lock()
 	var drops []common.Hash
 	for _, module := range pool.modules {
@@ -659,6 +650,7 @@ func (pool *TxPool) SetGasPrice(price *big.Int) {
 		pool.pendingNonce = make(map[common.Address]uint64)
 		pool.locals = newAccountSet(pool.signer)
 		pool.priced = newTxPricedList(pool.all)
+		pool.pendingView.clear()
 
 		pool.mu.Unlock()
 	}
@@ -708,8 +700,7 @@ func (pool *TxPool) Content() (map[common.Address]types.Transactions, map[common
 
 // Pending retrieves all currently processable transactions, groupped by origin
 // account and sorted by nonce. The returned transaction set is a copy and can be
-// freely modified by calling code. Hot paths such as miner/speculative-exec
-// should prefer PendingSnapshot to avoid pool locks.
+// freely modified by calling code.
 func (pool *TxPool) Pending() (map[common.Address]types.Transactions, error) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
@@ -728,36 +719,33 @@ func (pool *TxPool) pendingUnlocked() (map[common.Address]types.Transactions, er
 	return pending, nil
 }
 
-// publishPendingSnapshotLocked rebuilds and atomic-swaps the pending snapshot.
-// Must be invoked while pool.mu is held write-exclusive (or during init before
-// goroutines start). Consumers read via PendingSnapshot without any lock.
-// This intentionally pays the rebuild cost on the writer side to keep miner
-// reads lock-free; revisit with incremental publication if writer pressure
-// becomes material.
-func (pool *TxPool) publishPendingSnapshotLocked() {
-	snap := &pendingSnapshot{
-		byAddr: make(map[common.Address]types.Transactions, len(pool.pending)),
-	}
-	for addr, list := range pool.pending {
-		snap.byAddr[addr] = list.CachedTxsFlattenByCount(list.Len())
-	}
-	pool.pendingSnapshot.Store(snap)
+// PendingSnapshot returns a lock-free, eventually-consistent view of pending
+// transactions. Hot block-building paths should prefer this over Pending() to
+// avoid pool.mu contention. The outer map is freshly allocated and may be
+// mutated; per-account slices are aliased and must be treated as read-only.
+func (pool *TxPool) PendingSnapshot() map[common.Address]types.Transactions {
+	return pool.pendingView.snapshot()
 }
 
-// PendingSnapshot returns a lock-free snapshot of pending transactions,
-// shallow-copied into a fresh outer map so downstream consumers that mutate
-// it in place (FilterTransactionWithBaseFee, builder.FilterTxs,
-// NewTransactionsByPriceAndNonce) remain safe. Per-account slices are read-only.
-func (pool *TxPool) PendingSnapshot() map[common.Address]types.Transactions {
-	snap := pool.pendingSnapshot.Load()
-	if snap == nil {
-		return map[common.Address]types.Transactions{}
+// publishPendingAccountLocked re-publishes the pendingView entry for one
+// account from the current pool.pending state. Caller must hold pool.mu.
+//
+// Centralizing publication here makes it easy to audit that every pool.pending
+// mutation has a corresponding view update — a missed call would surface as
+// silent staleness for that account in the miner's snapshot.
+func (pool *TxPool) publishPendingAccountLocked(addr common.Address) {
+	if list := pool.pending[addr]; list != nil && !list.Empty() {
+		pool.pendingView.set(addr, list.CachedTxsFlattenByCount(list.Len()))
+	} else {
+		pool.pendingView.delete(addr)
 	}
-	clone := make(map[common.Address]types.Transactions, len(snap.byAddr))
-	for addr, txs := range snap.byAddr {
-		clone[addr] = txs
+}
+
+// publishPendingAccountsLocked is the batched form. Caller must hold pool.mu.
+func (pool *TxPool) publishPendingAccountsLocked(addrs map[common.Address]struct{}) {
+	for addr := range addrs {
+		pool.publishPendingAccountLocked(addr)
 	}
-	return clone
 }
 
 // queueUnlocked must be protected by pool.mu AND pool.txMu by the caller.
@@ -1254,6 +1242,7 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		pool.all.Add(tx)
 		pool.priced.Put(tx)
 		pool.journalTx(from, tx)
+		pool.publishPendingAccountLocked(from)
 
 		logger.Trace("Pooled new executable transaction", "hash", hash, "from", from, "to", tx.To())
 
@@ -1360,6 +1349,9 @@ func (pool *TxPool) promoteTx(addr common.Address, hash common.Hash, tx *types.T
 	pool.beats[addr] = time.Now()
 	pool.setPendingNonce(addr, tx.Nonce()+1)
 
+	// Caller is responsible for publishing the pendingView entry for addr
+	// after batching. promoteExecutables() does this; pool.add()'s direct
+	// replacement path publishes inline.
 	return true
 }
 
@@ -1576,7 +1568,6 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
-	defer pool.publishPendingSnapshotLocked()
 
 	// Try to inject the transaction and update any state
 	replace, err := pool.add(tx, local)
@@ -1598,9 +1589,7 @@ func (pool *TxPool) addTxs(txs []*types.Transaction, local bool) []error {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
-	errs := pool.addTxsLocked(txs, local)
-	pool.publishPendingSnapshotLocked()
-	return errs
+	return pool.addTxsLocked(txs, local)
 }
 
 // addTxsLocked attempts to queue a batch of transactions if they are valid,
@@ -1715,6 +1704,7 @@ func (pool *TxPool) removeTx(hash common.Hash, outofbound bool) {
 			if pending.Empty() {
 				delete(pool.pending, addr)
 			}
+			pool.publishPendingAccountLocked(addr)
 			// Postpone any invalidated transactions
 			for _, tx := range invalids {
 				pool.enqueueTx(tx.Hash(), tx)
@@ -1740,6 +1730,11 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 	defer pool.txMu.Unlock()
 	// Track the promoted transactions to broadcast them at once
 	var promoted []*types.Transaction
+	// Pending accounts touched by promotion or fairness trimming. Republished
+	// once per account at the end so we don't pay O(k^2) for promoting k
+	// sequential txs from a single hot account.
+	dirtyPending := make(map[common.Address]struct{})
+	defer pool.publishPendingAccountsLocked(dirtyPending)
 
 	// Gather all the accounts potentially needing updates
 	if accounts == nil {
@@ -1784,6 +1779,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 			if pool.promoteTx(addr, hash, tx) {
 				logger.Trace("Promoting queued transaction", "hash", hash)
 				promoted = append(promoted, tx)
+				dirtyPending[addr] = struct{}{}
 			}
 		}
 
@@ -1872,6 +1868,11 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 				}
 			}
 		}
+		// Mark every offender whose pending was trimmed by the fairness caps;
+		// the deferred publish at function exit covers them.
+		for _, addr := range offenders {
+			dirtyPending[addr] = struct{}{}
+		}
 		pendingRateLimitCounter.Inc(int64(pendingBeforeCap - pending))
 	}
 	// If we've queued more transactions than the hard limit, drop oldest ones
@@ -1926,8 +1927,11 @@ func (pool *TxPool) demoteUnexecutables() {
 
 	// full-validation count. demoteUnexecutables does full-validation for a limited number of txs.
 	cnt := 0
+	dirty := make(map[common.Address]struct{}, len(pool.pending))
+	defer pool.publishPendingAccountsLocked(dirty)
 	// Iterate over all accounts and demote any non-executable transactions
 	for addr, list := range pool.pending {
+		dirty[addr] = struct{}{}
 		nonce := pool.getNonce(addr)
 		var drops, invalids types.Transactions
 
@@ -2338,5 +2342,5 @@ func (pool *TxPool) Clear() {
 	pool.pending = make(map[common.Address]*txList)
 	pool.queue = make(map[common.Address]*txList)
 	pool.pendingNonce = make(map[common.Address]uint64)
-	pool.publishPendingSnapshotLocked()
+	pool.pendingView.clear()
 }
