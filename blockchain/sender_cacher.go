@@ -27,6 +27,7 @@ import (
 	"runtime"
 
 	"github.com/kaiachain/kaia/blockchain/types"
+	"github.com/kaiachain/kaia/common"
 )
 
 // senderCacher is a concurrent transaction sender recoverer and cacher.
@@ -131,4 +132,45 @@ func (cacher *txSenderCacher) recoverFromBlocks(signer types.Signer, blocks []*t
 		txs = append(txs, block.Transactions()...)
 	}
 	cacher.recover(signer, txs)
+}
+
+// WarmSenders copies the sender cache from pool-resident twins into block txs
+// (no slice mutation — block.transactions is shared with encoders/gossip) and
+// kicks async ecrecover for the rest. Senders with incompatible signers fall
+// back to ecrecover via the recovery queue. Pass a nil lookup to disable the
+// pool-hit transplant and just warm via async recovery.
+func WarmSenders(signer types.Signer, block *types.Block, lookup func(common.Hash) *types.Transaction) {
+	if block == nil {
+		return
+	}
+	txs := block.Transactions()
+	toRecover := make([]*types.Transaction, 0, len(txs))
+	if lookup != nil {
+		for _, tx := range txs {
+			if tx == nil {
+				continue
+			}
+			known := lookup(tx.Hash())
+			if known == nil || known == tx {
+				toRecover = append(toRecover, tx)
+				continue
+			}
+			if v := known.CachedFrom(); v != nil {
+				tx.StoreFromCache(v)
+			}
+			if tx.IsFeeDelegatedTransaction() {
+				if v := known.CachedFeePayer(); v != nil {
+					tx.StoreFeePayerCache(v)
+				}
+			}
+			// Recovery is idempotent for already-cached transactions, so queueing
+			// the whole block avoids a second branchy pass to filter warmed txs.
+			toRecover = append(toRecover, tx)
+		}
+	} else {
+		toRecover = append(toRecover, txs...)
+	}
+	if len(toRecover) > 0 {
+		senderCacher.recover(signer, toRecover)
+	}
 }

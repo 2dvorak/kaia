@@ -887,6 +887,11 @@ func (m *machine) startSpeculativeExecution(proposal bft.Proposal) {
 	blockHash := block.Hash()
 	entry := m.b.specCache.Reserve(blockHash)
 
+	// Adopt pool-known tx senders and kick parallel ecrecover for the rest,
+	// so spec exec's per-tx signer phase is near-free.
+	signer := types.MakeSigner(m.b.chain.Config(), block.Number())
+	blockchain.WarmSenders(signer, block, m.b.chain.TxLookup())
+
 	// Clone executor for isolated execution.
 	executor := m.b.executor.Clone()
 
@@ -896,6 +901,10 @@ func (m *machine) startSpeculativeExecution(proposal bft.Proposal) {
 		entry.Complete(nil, errors.New("parent header not found"))
 		return
 	}
+
+	// Warm trie-node cache so spec-exec's first-access reads hit memory.
+	// ctx ties prefetch lifetime to this spec-exec round.
+	blockchain.PrefetchBlockState(ctx, m.b.chain, parentHeader.Root, block.Transactions(), signer)
 
 	m.wg.Add(1)
 	go func() {
