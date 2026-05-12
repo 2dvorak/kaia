@@ -256,10 +256,8 @@ type TxPool struct {
 	txMsgCh  chan types.Transactions // A buffer for async tx intake via AddRemotes
 	txFeedCh chan types.Transactions // A buffer for async tx event emission via txFeed
 
-	// scheduleReorgLoop coordinates reset/promote work and event emission off
-	// the hot path.
+	// scheduleReorgLoop coordinates reset work and event emission off the hot path.
 	reqResetCh      chan *txpoolResetRequest
-	reqPromoteCh    chan *accountSet
 	queueTxEventCh  chan *types.Transaction
 	reorgDoneCh     chan chan struct{}
 	reorgShutdownCh chan struct{}
@@ -300,7 +298,6 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 		txMsgCh:               make(chan types.Transactions, txMsgChSize),
 		txFeedCh:              make(chan types.Transactions, txFeedChSize),
 		reqResetCh:            make(chan *txpoolResetRequest),
-		reqPromoteCh:          make(chan *accountSet),
 		queueTxEventCh:        make(chan *types.Transaction),
 		reorgDoneCh:           make(chan chan struct{}),
 		reorgShutdownCh:       make(chan struct{}),
@@ -1556,11 +1553,15 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 	if err != nil {
 		return err
 	}
-	dirty := newAccountSet(pool.signer)
 	if !replace {
-		dirty.addTx(tx)
+		from, _ := types.Sender(pool.signer, tx)
+		pool.mu.Lock()
+		promoted := pool.promoteExecutables([]common.Address{from})
+		pool.mu.Unlock()
+		if len(promoted) > 0 {
+			pool.txFeed.Send(NewTxsEvent{Txs: promoted})
+		}
 	}
-	<-pool.requestPromoteExecutables(dirty)
 	return nil
 }
 
@@ -1579,7 +1580,12 @@ func (pool *TxPool) addTxs(txs []*types.Transaction, local bool) []error {
 	copy(errs, addErrs)
 
 	if dirty != nil && !dirty.empty() {
-		<-pool.requestPromoteExecutables(dirty)
+		pool.mu.Lock()
+		promoted := pool.promoteExecutables(dirty.flatten())
+		pool.mu.Unlock()
+		if len(promoted) > 0 {
+			pool.txFeed.Send(NewTxsEvent{Txs: promoted})
+		}
 	}
 	return errs
 }
@@ -2361,17 +2367,6 @@ func (pool *TxPool) requestReset(oldHead, newHead *types.Header) chan struct{} {
 	}
 }
 
-// requestPromoteExecutables hands a dirty-account set to scheduleReorgLoop and
-// returns the channel that closes when the resulting runReorg has finished.
-func (pool *TxPool) requestPromoteExecutables(set *accountSet) chan struct{} {
-	select {
-	case pool.reqPromoteCh <- set:
-		return <-pool.reorgDoneCh
-	case <-pool.reorgShutdownCh:
-		return pool.reorgShutdownCh
-	}
-}
-
 // queueTxEvent enqueues a replacement-into-pending transaction for the next
 // runReorg broadcast. It does not trigger a new run by itself.
 func (pool *TxPool) queueTxEvent(tx *types.Transaction) {
@@ -2381,9 +2376,9 @@ func (pool *TxPool) queueTxEvent(tx *types.Transaction) {
 	}
 }
 
-// scheduleReorgLoop services reset / promote / queueTxEvent requests, merging
-// concurrent ones into a single runReorg. At most one runReorg is in flight at
-// a time.
+// scheduleReorgLoop coalesces concurrent chain-head resets into single runReorg
+// invocations. queueTxEvents accumulate and are broadcast alongside reset results.
+// At most one runReorg is in flight at a time.
 func (pool *TxPool) scheduleReorgLoop() {
 	defer pool.wg.Done()
 
@@ -2392,17 +2387,15 @@ func (pool *TxPool) scheduleReorgLoop() {
 		nextDone      = make(chan struct{})
 		launchNextRun bool
 		reset         *txpoolResetRequest
-		dirtyAccounts *accountSet
 		queuedEvents  = make(map[common.Address]types.Transactions)
 	)
 
 	for {
-		// Launch the next runReorg if there is queued work and none is in flight.
 		if curDone == nil && launchNextRun {
-			go pool.runReorg(nextDone, reset, dirtyAccounts, queuedEvents)
+			go pool.runReorg(nextDone, reset, queuedEvents)
 			curDone, nextDone = nextDone, make(chan struct{})
 			launchNextRun = false
-			reset, dirtyAccounts = nil, nil
+			reset = nil
 			queuedEvents = make(map[common.Address]types.Transactions)
 		}
 
@@ -2412,15 +2405,6 @@ func (pool *TxPool) scheduleReorgLoop() {
 				reset = req
 			} else {
 				reset.newHead = req.newHead
-			}
-			launchNextRun = true
-			pool.reorgDoneCh <- nextDone
-
-		case req := <-pool.reqPromoteCh:
-			if dirtyAccounts == nil {
-				dirtyAccounts = req
-			} else {
-				dirtyAccounts.merge(req)
 			}
 			launchNextRun = true
 			pool.reorgDoneCh <- nextDone
@@ -2443,24 +2427,15 @@ func (pool *TxPool) scheduleReorgLoop() {
 	}
 }
 
-// runReorg performs the actual reset/promote work off the scheduling loop and
-// emits a single coalesced NewTxsEvent for all promoted and queued-event txs.
-func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, dirtyAccounts *accountSet, queuedEvents map[common.Address]types.Transactions) {
+// runReorg performs a chain-head reset off the scheduling loop and emits a
+// single coalesced NewTxsEvent for all promoted and queued-event txs.
+func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, queuedEvents map[common.Address]types.Transactions) {
 	defer close(done)
 
-	var (
-		promoted     types.Transactions
-		promoteAddrs []common.Address
-	)
-	if dirtyAccounts != nil && reset == nil {
-		promoteAddrs = dirtyAccounts.flatten()
-	}
-
+	var promoted types.Transactions
 	pool.mu.Lock()
 	if reset != nil {
 		promoted = pool.reset(reset.oldHead, reset.newHead)
-	} else {
-		promoted = pool.promoteExecutables(promoteAddrs)
 	}
 	pool.mu.Unlock()
 
