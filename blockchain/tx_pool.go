@@ -256,6 +256,14 @@ type TxPool struct {
 	txMsgCh  chan types.Transactions // A buffer for async tx intake via AddRemotes
 	txFeedCh chan types.Transactions // A buffer for async tx event emission via txFeed
 
+	// scheduleReorgLoop coordinates reset/promote work and event emission off
+	// the hot path.
+	reqResetCh      chan *txpoolResetRequest
+	reqPromoteCh    chan *accountSet
+	queueTxEventCh  chan *types.Transaction
+	reorgDoneCh     chan chan struct{}
+	reorgShutdownCh chan struct{}
+
 	missingBlobSidecarsCh chan *MissingBlobSidecar // A buffer for async missing blob sidecars event emission
 
 	rules params.Rules // Fork indicator
@@ -291,6 +299,11 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 		blobBaseFee:           new(big.Int).SetUint64(params.ZeroBaseFee),
 		txMsgCh:               make(chan types.Transactions, txMsgChSize),
 		txFeedCh:              make(chan types.Transactions, txFeedChSize),
+		reqResetCh:            make(chan *txpoolResetRequest),
+		reqPromoteCh:          make(chan *accountSet),
+		queueTxEventCh:        make(chan *types.Transaction),
+		reorgDoneCh:           make(chan chan struct{}),
+		reorgShutdownCh:       make(chan struct{}),
 		missingBlobSidecarsCh: make(chan *MissingBlobSidecar, missingBlobSidecarsChSize),
 		govModule:             govModule,
 	}
@@ -321,7 +334,7 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 	pool.wg.Add(3)
 	go pool.loop()
 	go pool.handleTxMsg()
-	go pool.handleTxFeed()
+	go pool.scheduleReorgLoop()
 
 	if config.EnableSpamThrottlerAtRuntime {
 		if err := pool.StartSpamThrottler(DefaultSpamThrottlerConfig); err != nil {
@@ -360,18 +373,17 @@ func (pool *TxPool) loop() {
 		case ev := <-pool.chainHeadCh:
 			if ev.Block != nil {
 				pool.saveAndPruneBlobStorage(ev.Block)
-				pool.mu.Lock()
 				currBlock := pool.chain.CurrentBlock()
 				if ev.Block.Root() != currBlock.Root() {
-					pool.mu.Unlock()
 					logger.Debug("block from ChainHeadEvent is different from the CurrentBlock",
 						"receivedNum", ev.Block.NumberU64(), "receivedHash", ev.Block.Hash().String(),
 						"currNum", currBlock.NumberU64(), "currHash", currBlock.Hash().String())
 					continue
 				}
-				pool.reset(head.Header(), ev.Block.Header())
+				// Hand the reset to scheduleReorgLoop and wait for it to finish so
+				// the published snapshot is up-to-date before the next head arrives.
+				<-pool.requestReset(head.Header(), ev.Block.Header())
 				head = ev.Block
-				pool.mu.Unlock()
 			}
 		// Be unsubscribed due to system stopped
 		case <-pool.chainHeadSub.Err():
@@ -437,7 +449,7 @@ func (pool *TxPool) lockedReset(oldHead, newHead *types.Header) {
 
 // reset retrieves the current state of the blockchain and ensures the content
 // of the transaction pool is valid with regard to the chain state.
-func (pool *TxPool) reset(oldHead, newHead *types.Header) {
+func (pool *TxPool) reset(oldHead, newHead *types.Header) types.Transactions {
 	pool.txMu.Lock()
 	var drops []common.Hash
 	for _, module := range pool.modules {
@@ -475,7 +487,7 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 				if newNum >= oldNum {
 					logger.Error("Transaction pool reset with missing oldhead",
 						"old", oldHead.Hash(), "oldnum", oldNum, "new", newHead.Hash(), "newnum", newNum)
-					return
+					return nil
 				} else {
 					// When setHead is performed, then oldHead becomes bigger than newHead, since newHead becomes rewinded blockNumber.
 					// If that is the case, we don't have the lost transactions anymore, and
@@ -488,26 +500,26 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 					discarded = append(discarded, rem.Transactions()...)
 					if rem = pool.chain.GetBlock(rem.ParentHash(), rem.NumberU64()-1); rem == nil {
 						logger.Error("Unrooted old chain seen by tx pool", "block", oldHead.Number, "hash", oldHead.Hash())
-						return
+						return nil
 					}
 				}
 				for add.NumberU64() > rem.NumberU64() {
 					included = append(included, add.Transactions()...)
 					if add = pool.chain.GetBlock(add.ParentHash(), add.NumberU64()-1); add == nil {
 						logger.Error("Unrooted new chain seen by tx pool", "block", newHead.Number, "hash", newHead.Hash())
-						return
+						return nil
 					}
 				}
 				for rem.Hash() != add.Hash() {
 					discarded = append(discarded, rem.Transactions()...)
 					if rem = pool.chain.GetBlock(rem.ParentHash(), rem.NumberU64()-1); rem == nil {
 						logger.Error("Unrooted old chain seen by tx pool", "block", oldHead.Number, "hash", oldHead.Hash())
-						return
+						return nil
 					}
 					included = append(included, add.Transactions()...)
 					if add = pool.chain.GetBlock(add.ParentHash(), add.NumberU64()-1); add == nil {
 						logger.Error("Unrooted new chain seen by tx pool", "block", newHead.Number, "hash", newHead.Hash())
-						return
+						return nil
 					}
 				}
 				reinject = types.TxDifference(discarded, included)
@@ -522,7 +534,7 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 	stateDB, err := pool.chain.StateAt(newHead.Root)
 	if err != nil {
 		logger.Error("Failed to reset txpool state", "err", err)
-		return
+		return nil
 	}
 	pool.currentState = stateDB
 	pool.pendingNonce = make(map[common.Address]uint64)
@@ -535,7 +547,7 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 	// pool.mu.Lock()
 	// defer pool.mu.Unlock()
 
-	pool.addTxsLocked(reinject, false, pool.rules)
+	_, _ = pool.addTxsLocked(reinject, false, pool.rules)
 
 	// validate the pool of pending transactions, this will remove
 	// any transactions that have been included in the block or
@@ -553,9 +565,6 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 		}
 	}
 	pool.txMu.Unlock()
-	// Check the queue and move transactions over to the pending if possible
-	// or remove those that have become invalid
-	pool.promoteExecutables(nil)
 
 	// Update all fork indicator by next pending block number.
 	pool.rules = pool.chainconfig.Rules(new(big.Int).Add(newHead.Number, big.NewInt(1)))
@@ -593,6 +602,10 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 			module.PostReset(oldHead, newHead, queue, pending)
 		}
 	}()
+
+	// Check the queue and move transactions over to the pending if possible
+	// or remove those that have become invalid
+	return pool.promoteExecutables(nil)
 }
 
 // Stop terminates the transaction pool.
@@ -602,6 +615,7 @@ func (pool *TxPool) Stop() {
 
 	// Unsubscribe subscriptions registered from blockchain
 	pool.chainHeadSub.Unsubscribe()
+	close(pool.reorgShutdownCh)
 	pool.wg.Wait()
 
 	if pool.journal != nil {
@@ -1229,7 +1243,7 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		logger.Trace("Pooled new executable transaction", "hash", hash, "from", from, "to", tx.To())
 
 		// We've directly injected a replacement transaction, notify subsystems
-		pool.txFeedCh <- types.Transactions{tx}
+		pool.queueTxEvent(tx)
 
 		return old != nil, nil
 	}
@@ -1461,19 +1475,6 @@ func (pool *TxPool) handleTxMsg() {
 	}
 }
 
-func (pool *TxPool) handleTxFeed() {
-	defer pool.wg.Done()
-
-	for {
-		select {
-		case txs := <-pool.txFeedCh:
-			pool.txFeed.Send(NewTxsEvent{txs})
-		case <-pool.chainHeadSub.Err():
-			return
-		}
-	}
-}
-
 // AddLocal enqueues a single transaction into the pool if it is valid, marking
 // the sender as a local one in the mean time, ensuring it goes around the local
 // pricing constraints.
@@ -1550,18 +1551,16 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 	}
 
 	pool.mu.Lock()
-	defer pool.mu.Unlock()
-
-	// Try to inject the transaction and update any state
 	replace, err := pool.add(tx, local)
+	pool.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	// If we added a new transaction, run promotion checks and return
+	dirty := newAccountSet(pool.signer)
 	if !replace {
-		from, _ := types.Sender(pool.signer, tx) // already validated
-		pool.promoteExecutables([]common.Address{from})
+		dirty.addTx(tx)
 	}
+	<-pool.requestPromoteExecutables(dirty)
 	return nil
 }
 
@@ -1573,17 +1572,23 @@ func (pool *TxPool) addTxs(txs []*types.Transaction, local bool) []error {
 	rules := pool.rules
 	pool.mu.RUnlock()
 
+	errs := make([]error, len(txs))
 	pool.mu.Lock()
-	defer pool.mu.Unlock()
+	dirty, addErrs := pool.addTxsLocked(txs, local, rules)
+	pool.mu.Unlock()
+	copy(errs, addErrs)
 
-	return pool.addTxsLocked(txs, local, rules)
+	if dirty != nil && !dirty.empty() {
+		<-pool.requestPromoteExecutables(dirty)
+	}
+	return errs
 }
 
 // addTxsLocked attempts to queue a batch of transactions if they are valid,
 // whilst assuming the transaction pool lock is already held.
-func (pool *TxPool) addTxsLocked(txs []*types.Transaction, local bool, rules params.Rules) []error {
+func (pool *TxPool) addTxsLocked(txs []*types.Transaction, local bool, rules params.Rules) (*accountSet, []error) {
 	// Add the batch of transaction, tracking the accepted ones
-	dirty := make(map[common.Address]struct{})
+	dirty := newAccountSet(pool.signer)
 	errs := make([]error, len(txs))
 
 	for i, tx := range txs {
@@ -1595,21 +1600,12 @@ func (pool *TxPool) addTxsLocked(txs []*types.Transaction, local bool, rules par
 		var replace bool
 		if replace, errs[i] = pool.add(tx, local); errs[i] == nil {
 			if !replace {
-				from, _ := types.Sender(pool.signer, tx) // already validated
-				dirty[from] = struct{}{}
+				dirty.addTx(tx)
 			}
 		}
 	}
 
-	// Only reprocess the internal state if something was actually added
-	if len(dirty) > 0 {
-		addrs := make([]common.Address, 0, len(dirty))
-		for addr := range dirty {
-			addrs = append(addrs, addr)
-		}
-		pool.promoteExecutables(addrs)
-	}
-	return errs
+	return dirty, errs
 }
 
 // Status returns the status (unknown/pending/queued) of a batch of transactions
@@ -1716,7 +1712,7 @@ func (pool *TxPool) removeTx(hash common.Hash, outofbound bool) {
 // promoteExecutables moves transactions that have become processable from the
 // future queue to the set of pending transactions. During this process, all
 // invalidated transactions (low nonce, low balance) are deleted.
-func (pool *TxPool) promoteExecutables(accounts []common.Address) {
+func (pool *TxPool) promoteExecutables(accounts []common.Address) []*types.Transaction {
 	pool.txMu.Lock()
 	defer pool.txMu.Unlock()
 	// Track the promoted transactions to broadcast them at once
@@ -1782,10 +1778,6 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 		if list.Empty() {
 			delete(pool.queue, addr)
 		}
-	}
-	// Notify subsystem for new promoted transactions.
-	if len(promoted) > 0 {
-		pool.txFeedCh <- promoted
 	}
 	// If the pending limit is overflown, start equalizing allowances
 	pending := uint64(0)
@@ -1896,6 +1888,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 			}
 		}
 	}
+	return promoted
 }
 
 // demoteUnexecutables removes invalid and processed transactions from the pools
@@ -2166,6 +2159,35 @@ func (as *accountSet) add(addr common.Address) {
 	as.accounts[addr] = struct{}{}
 }
 
+// addTx inserts the sender of tx into the set.
+func (as *accountSet) addTx(tx *types.Transaction) {
+	if addr, err := types.Sender(as.signer, tx); err == nil {
+		as.accounts[addr] = struct{}{}
+	}
+}
+
+// merge folds another set of addresses into the receiver.
+func (as *accountSet) merge(other *accountSet) {
+	if other == nil {
+		return
+	}
+	for addr := range other.accounts {
+		as.accounts[addr] = struct{}{}
+	}
+}
+
+// flatten returns the addresses as a slice.
+func (as *accountSet) flatten() []common.Address {
+	addrs := make([]common.Address, 0, len(as.accounts))
+	for addr := range as.accounts {
+		addrs = append(addrs, addr)
+	}
+	return addrs
+}
+
+// empty reports whether the set has no addresses.
+func (as *accountSet) empty() bool { return len(as.accounts) == 0 }
+
 // txLookup is used internally by TxPool to track transactions while allowing lookup without
 // mutex contention.
 //
@@ -2319,4 +2341,134 @@ func (pool *TxPool) Clear() {
 	pool.pending = make(map[common.Address]*txList)
 	pool.queue = make(map[common.Address]*txList)
 	pool.pendingNonce = make(map[common.Address]uint64)
+}
+
+// txpoolResetRequest carries an oldHead/newHead pair from the chainHeadCh
+// handler to scheduleReorgLoop. Multiple concurrent requests are coalesced
+// into the latest newHead, so a burst of head events runs at most one reset.
+type txpoolResetRequest struct {
+	oldHead, newHead *types.Header
+}
+
+// requestReset hands a chainHead reset to scheduleReorgLoop and returns the
+// channel that closes when the resulting runReorg has finished.
+func (pool *TxPool) requestReset(oldHead, newHead *types.Header) chan struct{} {
+	select {
+	case pool.reqResetCh <- &txpoolResetRequest{oldHead, newHead}:
+		return <-pool.reorgDoneCh
+	case <-pool.reorgShutdownCh:
+		return pool.reorgShutdownCh
+	}
+}
+
+// requestPromoteExecutables hands a dirty-account set to scheduleReorgLoop and
+// returns the channel that closes when the resulting runReorg has finished.
+func (pool *TxPool) requestPromoteExecutables(set *accountSet) chan struct{} {
+	select {
+	case pool.reqPromoteCh <- set:
+		return <-pool.reorgDoneCh
+	case <-pool.reorgShutdownCh:
+		return pool.reorgShutdownCh
+	}
+}
+
+// queueTxEvent enqueues a replacement-into-pending transaction for the next
+// runReorg broadcast. It does not trigger a new run by itself.
+func (pool *TxPool) queueTxEvent(tx *types.Transaction) {
+	select {
+	case pool.queueTxEventCh <- tx:
+	case <-pool.reorgShutdownCh:
+	}
+}
+
+// scheduleReorgLoop services reset / promote / queueTxEvent requests, merging
+// concurrent ones into a single runReorg. At most one runReorg is in flight at
+// a time.
+func (pool *TxPool) scheduleReorgLoop() {
+	defer pool.wg.Done()
+
+	var (
+		curDone       chan struct{}
+		nextDone      = make(chan struct{})
+		launchNextRun bool
+		reset         *txpoolResetRequest
+		dirtyAccounts *accountSet
+		queuedEvents  = make(map[common.Address]types.Transactions)
+	)
+
+	for {
+		// Launch the next runReorg if there is queued work and none is in flight.
+		if curDone == nil && launchNextRun {
+			go pool.runReorg(nextDone, reset, dirtyAccounts, queuedEvents)
+			curDone, nextDone = nextDone, make(chan struct{})
+			launchNextRun = false
+			reset, dirtyAccounts = nil, nil
+			queuedEvents = make(map[common.Address]types.Transactions)
+		}
+
+		select {
+		case req := <-pool.reqResetCh:
+			if reset == nil {
+				reset = req
+			} else {
+				reset.newHead = req.newHead
+			}
+			launchNextRun = true
+			pool.reorgDoneCh <- nextDone
+
+		case req := <-pool.reqPromoteCh:
+			if dirtyAccounts == nil {
+				dirtyAccounts = req
+			} else {
+				dirtyAccounts.merge(req)
+			}
+			launchNextRun = true
+			pool.reorgDoneCh <- nextDone
+
+		case tx := <-pool.queueTxEventCh:
+			if addr, err := types.Sender(pool.signer, tx); err == nil {
+				queuedEvents[addr] = append(queuedEvents[addr], tx)
+			}
+
+		case <-curDone:
+			curDone = nil
+
+		case <-pool.reorgShutdownCh:
+			if curDone != nil {
+				<-curDone
+			}
+			close(nextDone)
+			return
+		}
+	}
+}
+
+// runReorg performs the actual reset/promote work off the scheduling loop and
+// emits a single coalesced NewTxsEvent for all promoted and queued-event txs.
+func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, dirtyAccounts *accountSet, queuedEvents map[common.Address]types.Transactions) {
+	defer close(done)
+
+	var (
+		promoted     types.Transactions
+		promoteAddrs []common.Address
+	)
+	if dirtyAccounts != nil && reset == nil {
+		promoteAddrs = dirtyAccounts.flatten()
+	}
+
+	pool.mu.Lock()
+	if reset != nil {
+		promoted = pool.reset(reset.oldHead, reset.newHead)
+	} else {
+		promoted = pool.promoteExecutables(promoteAddrs)
+	}
+	pool.mu.Unlock()
+
+	txs := promoted
+	for _, set := range queuedEvents {
+		txs = append(txs, set...)
+	}
+	if len(txs) > 0 {
+		pool.txFeed.Send(NewTxsEvent{Txs: txs})
+	}
 }
