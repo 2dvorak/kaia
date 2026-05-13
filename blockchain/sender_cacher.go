@@ -85,6 +85,20 @@ func cacheSender(signer types.Signer, tx *types.Transaction) {
 	}
 }
 
+func copySenderCache(dst, src *types.Transaction) {
+	if dst == nil || src == nil || dst == src {
+		return
+	}
+	if v := src.CachedFrom(); v != nil {
+		dst.StoreFromCache(v)
+	}
+	if dst.IsFeeDelegatedTransaction() {
+		if v := src.CachedFeePayer(); v != nil {
+			dst.StoreFeePayerCache(v)
+		}
+	}
+}
+
 // cache is an infinite loop, caching transaction senders from various forms of
 // data structures.
 func (cacher *txSenderCacher) cache() {
@@ -153,14 +167,7 @@ func WarmSenders(signer types.Signer, block *types.Block, lookup func(common.Has
 				toRecover = append(toRecover, tx)
 				continue
 			}
-			if v := known.CachedFrom(); v != nil {
-				tx.StoreFromCache(v)
-			}
-			if tx.IsFeeDelegatedTransaction() {
-				if v := known.CachedFeePayer(); v != nil {
-					tx.StoreFeePayerCache(v)
-				}
-			}
+			copySenderCache(tx, known)
 			// Recovery is idempotent for already-cached transactions, so queueing
 			// the whole block avoids a second branchy pass to filter warmed txs.
 			toRecover = append(toRecover, tx)
