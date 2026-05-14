@@ -730,6 +730,21 @@ func (mr *MockBackendMockRecorder) SuggestTipCap(arg0 interface{}) *gomock.Call 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SuggestTipCap", reflect.TypeOf((*MockBackend)(nil).SuggestTipCap), arg0)
 }
 
+// TxPoolContentFrom mocks base method.
+func (m *MockBackend) TxPoolContentFrom(addr common.Address) (types.Transactions, types.Transactions) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "TxPoolContentFrom", addr)
+	ret0, _ := ret[0].(types.Transactions)
+	ret1, _ := ret[1].(types.Transactions)
+	return ret0, ret1
+}
+
+// TxPoolContentFrom indicates an expected call of TxPoolContentFrom.
+func (mr *MockBackendMockRecorder) TxPoolContentFrom(addr interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "TxPoolContentFrom", reflect.TypeOf((*MockBackend)(nil).TxPoolContentFrom), addr)
+}
+
 // TxPoolContent mocks base method.
 func (m *MockBackend) TxPoolContent() (map[common.Address]types.Transactions, map[common.Address]types.Transactions) {
 	m.ctrl.T.Helper()

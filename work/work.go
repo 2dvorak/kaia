@@ -76,6 +76,7 @@ type TxPool interface {
 	Get(hash common.Hash) *types.Transaction
 	Stats() (int, int)
 	Content() (map[common.Address]types.Transactions, map[common.Address]types.Transactions)
+	ContentFrom(addr common.Address) (types.Transactions, types.Transactions)
 	StartSpamThrottler(conf *blockchain.ThrottlerConfig) error
 	StopSpamThrottler()
 

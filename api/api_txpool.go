@@ -27,6 +27,7 @@ import (
 	"strconv"
 
 	"github.com/kaiachain/kaia/blockchain/types"
+	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/hexutil"
 )
 
@@ -63,6 +64,23 @@ func (s *TxPoolAPI) Content() map[string]map[string]map[string]map[string]interf
 			dump[strconv.FormatUint(tx.Nonce(), 10)] = newRPCPendingTransaction(tx, s.b.ChainConfig())
 		}
 		content["queued"][account.Hex()] = dump
+	}
+	return content
+}
+
+// ContentFrom returns the pending and queued transactions of a specific address.
+func (s *TxPoolAPI) ContentFrom(addr common.Address) map[string]map[string]map[string]interface{} {
+	content := map[string]map[string]map[string]interface{}{
+		"pending": make(map[string]map[string]interface{}),
+		"queued":  make(map[string]map[string]interface{}),
+	}
+	pending, queue := s.b.TxPoolContentFrom(addr)
+
+	for _, tx := range pending {
+		content["pending"][strconv.FormatUint(tx.Nonce(), 10)] = newRPCPendingTransaction(tx, s.b.ChainConfig())
+	}
+	for _, tx := range queue {
+		content["queued"][strconv.FormatUint(tx.Nonce(), 10)] = newRPCPendingTransaction(tx, s.b.ChainConfig())
 	}
 	return content
 }

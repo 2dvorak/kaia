@@ -304,6 +304,10 @@ func (b *CNAPIBackend) TxPoolContent() (map[common.Address]types.Transactions, m
 	return b.cn.TxPool().Content()
 }
 
+func (b *CNAPIBackend) TxPoolContentFrom(addr common.Address) (types.Transactions, types.Transactions) {
+	return b.cn.TxPool().ContentFrom(addr)
+}
+
 func (b *CNAPIBackend) SubscribeNewTxsEvent(ch chan<- blockchain.NewTxsEvent) event.Subscription {
 	return b.cn.TxPool().SubscribeNewTxsEvent(ch)
 }

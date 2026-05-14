@@ -94,6 +94,7 @@ type Backend interface {
 	GetPoolNonce(ctx context.Context, addr common.Address) uint64
 	Stats() (pending int, queued int)
 	TxPoolContent() (map[common.Address]types.Transactions, map[common.Address]types.Transactions)
+	TxPoolContentFrom(addr common.Address) (types.Transactions, types.Transactions)
 	SubscribeNewTxsEvent(chan<- blockchain.NewTxsEvent) event.Subscription
 	GetBlobSidecar(blockNum *big.Int, txIndex int) (*types.BlobTxSidecar, error)
 
