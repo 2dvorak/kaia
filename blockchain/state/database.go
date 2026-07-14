@@ -189,8 +189,13 @@ func (db *cachingDB) CopyTrie(t Trie) Trie {
 	case *statedb.SecureTrie:
 		return t.Copy()
 	case *statedb.FlatAccountTrie:
+		// TODO-Kaia-FlatTrie: this is NOT an independent copy. Both StateDBs share one
+		// DeferredContext, so mutating either after StateDB.Copy() contaminates the other
+		// (e.g. miner bundle rollback, concurrent tracers). Must be fixed before FlatTrie
+		// is used outside block-sync.
 		return t
 	case *statedb.FlatStorageTrie:
+		// TODO-Kaia-FlatTrie: same sharing caveat as FlatAccountTrie above.
 		return t
 	default:
 		panic(fmt.Errorf("unknown trie type %T", t))
