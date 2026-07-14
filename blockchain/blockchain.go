@@ -1449,6 +1449,15 @@ func (bc *BlockChain) writeStateTrie(block *types.Block, state *state.StateDB) e
 		if bc.IsLivePruningRequired() {
 			bc.chPrune <- block.NumberU64()
 		}
+
+		// FlatTrie keeps its writes in a long-lived MDBX transaction; without periodic
+		// commits an archive node's domains data would only become durable at shutdown.
+		if dm := trieDB.DiskDB().GetDomainsManager(); dm != nil && isCommitTrieRequired(bc, block.NumberU64()) {
+			if err := dm.CommitWrites(); err != nil {
+				return err
+			}
+			logger.Debug("Committed domains manager changes into the disk", "blocknum", block.NumberU64())
+		}
 	} else {
 		// Full but not archive node, do proper garbage collection
 		trieDB.ReferenceRoot(root) // metadata reference to keep trie alive
@@ -2109,10 +2118,33 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			return i, events, coalescedLogs, err
 		}
 
+		// FlatTrie recovery: if a previous insertion of this block was interrupted after
+		// its state was committed to the domains database but before the chain head
+		// advanced, the commitment state can no longer be hashed on top of the parent
+		// state, so re-execution alone could never reproduce the header root. The domains
+		// database provably holds this block's exact post-state (the root-to-number
+		// mapping is only written when committing a fully validated block), so adopt the
+		// committed root and skip re-hashing and re-committing. Receipts, gas and bloom
+		// are still recomputed and validated below.
+		if dm := bc.db.GetDomainsManager(); dm != nil {
+			if num, found, dmErr := dm.ReadBlockNumByRoot(block.Root().Bytes()); dmErr == nil && found && num == block.NumberU64() {
+				if stateDB.AdoptCommittedFlatRoot(block.Root()) {
+					logger.Warn("Recovering interrupted FlatTrie insertion by adopting the committed state",
+						"number", block.NumberU64(), "hash", block.Hash(), "root", block.Root())
+				}
+			}
+		}
+
 		// Process block using the parent state as reference point.
 		receipts, logs, usedGas, internalTxTraces, procStats, err := bc.processor.Process(block, stateDB, bc.vmConfig)
 		if err != nil {
-			bc.reportBlock(block, receipts, err)
+			if stateErr := stateDB.Error(); stateErr != nil {
+				// The result was invalidated by a local state access failure; this is a
+				// node-side error, not an invalid block, so do not mark the block bad.
+				err = fmt.Errorf("%v (caused by local state error: %v)", err, stateErr)
+			} else {
+				bc.reportBlock(block, receipts, err)
+			}
 			atomic.StoreUint32(&followupInterrupt, 1)
 			return i, events, coalescedLogs, err
 		}
@@ -2120,7 +2152,13 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		// Validate the state using the default validator
 		err = bc.validator.ValidateState(block, parent, stateDB, receipts, usedGas)
 		if err != nil {
-			bc.reportBlock(block, receipts, err)
+			if stateErr := stateDB.Error(); stateErr != nil {
+				// A zero or garbage root computed after a local state failure must not be
+				// misdiagnosed as a consensus-invalid block.
+				err = fmt.Errorf("%v (caused by local state error: %v)", err, stateErr)
+			} else {
+				bc.reportBlock(block, receipts, err)
+			}
 			atomic.StoreUint32(&followupInterrupt, 1)
 			return i, events, coalescedLogs, err
 		}

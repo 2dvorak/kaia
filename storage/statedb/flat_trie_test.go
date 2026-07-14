@@ -104,6 +104,123 @@ func Test_FlatTrie_Random(t *testing.T) {
 	checkNodeIterator(t, accountTrie2, storageTries2, accounts, storages)
 }
 
+// Reproduces the "domains database ahead of the chain head" wedge: once a block's
+// state is committed, re-executing the same block from the parent state cannot hash.
+// The failure must be observable via HashError() instead of silently yielding a zero
+// root, and the poisoned trie must refuse to commit.
+func Test_FlatTrie_HashErrorSticky(t *testing.T) {
+	log.EnableLogForTest(log.LvlCrit, log.LvlCrit)
+	r := rand.New(rand.NewSource(42))
+	addr := randAddr(r)
+
+	dm, err := kaiatrie.NewTemporaryDomainsManager(t.TempDir())
+	require.NoError(t, err)
+	defer dm.Close()
+
+	root0, root1 := commitTwoBlocks(t, r, dm, addr)
+	require.NotEqual(t, root0, root1)
+
+	// Re-execute block 1 from the parent state (base 0) while the domains database
+	// already holds block 1's commitment state.
+	wedged, err := NewFlatAccountTrie(dm, root0, &TrieOpts{BaseBlockNumber: 0})
+	require.NoError(t, err)
+	require.NoError(t, wedged.TryUpdate(addr.Bytes(), randEOA(t, r)))
+
+	assert.Equal(t, common.Hash{}, wedged.Hash())
+	require.Error(t, wedged.HashError())
+
+	// A subsequent Commit must refuse to write state derived from the failed hash.
+	_, err = wedged.Commit(nil)
+	assert.Error(t, err)
+
+	// A storage trie hash failure must be recorded on the shared account trie too.
+	wedged2, err := NewFlatAccountTrie(dm, root0, &TrieOpts{BaseBlockNumber: 0})
+	require.NoError(t, err)
+	storageTrie, err := NewFlatStorageTrie(dm, addr, common.Hash{}, &TrieOpts{
+		BaseBlockNumber: 0,
+		AccountTrie:     wedged2,
+	})
+	require.NoError(t, err)
+	slotValue, _ := rlp.EncodeToBytes([]byte{0x42})
+	require.NoError(t, storageTrie.TryUpdate(randHash(r).Bytes(), slotValue))
+
+	assert.Equal(t, common.Hash{}, storageTrie.Hash())
+	require.Error(t, wedged2.HashError())
+}
+
+// Verifies the recovery path for an insertion interrupted after the state commit:
+// the committed root is discoverable via ReadBlockNumByRoot, a trie in adopted mode
+// reports it without hashing, and the chain can continue on top of it.
+func Test_FlatTrie_AdoptCommittedRoot(t *testing.T) {
+	log.EnableLogForTest(log.LvlCrit, log.LvlCrit)
+	r := rand.New(rand.NewSource(43))
+	addr := randAddr(r)
+
+	dm, err := kaiatrie.NewTemporaryDomainsManager(t.TempDir())
+	require.NoError(t, err)
+	defer dm.Close()
+
+	root0, root1 := commitTwoBlocks(t, r, dm, addr)
+
+	// This is the detection insertChain relies on: the domains database maps the
+	// committed root to its block number.
+	num, found, err := dm.ReadBlockNumByRoot(root1.Bytes())
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(1), num)
+
+	// Re-execute block 1 from the parent state, this time adopting the committed root.
+	adopted, err := NewFlatAccountTrie(dm, root0, &TrieOpts{BaseBlockNumber: 0})
+	require.NoError(t, err)
+	adopted.AdoptCommittedRoot(root1)
+	require.NoError(t, adopted.TryUpdate(addr.Bytes(), randEOA(t, r)))
+
+	storageTrie, err := NewFlatStorageTrie(dm, addr, root0, &TrieOpts{
+		BaseBlockNumber: 0,
+		AccountTrie:     adopted,
+	})
+	require.NoError(t, err)
+	slotValue, _ := rlp.EncodeToBytes([]byte{0x42})
+	require.NoError(t, storageTrie.TryUpdate(randHash(r).Bytes(), slotValue))
+
+	assert.Equal(t, root0, storageTrie.Hash()) // placeholder, not recomputed
+	assert.Equal(t, root1, adopted.Hash())
+	assert.NoError(t, adopted.HashError())
+
+	committedRoot, err := adopted.Commit(nil)
+	require.NoError(t, err)
+	assert.Equal(t, root1, committedRoot)
+
+	// The chain must be able to continue from the adopted head as block 2.
+	next, err := NewFlatAccountTrie(dm, root1, &TrieOpts{BaseBlockNumber: 1})
+	require.NoError(t, err)
+	require.NoError(t, next.TryUpdate(addr.Bytes(), randEOA(t, r)))
+	require.NotEqual(t, common.Hash{}, next.Hash())
+	require.NoError(t, next.HashError())
+	root2, err := next.Commit(nil)
+	require.NoError(t, err)
+	require.NotEqual(t, root1, root2)
+}
+
+// commitTwoBlocks commits an account to the genesis block and an updated account to
+// block 1, returning both state roots. Afterwards the domains database's commitment
+// state is at block 1.
+func commitTwoBlocks(t *testing.T, r *rand.Rand, dm *kaiatrie.DomainsManager, addr common.Address) (common.Hash, common.Hash) {
+	genesis, err := NewFlatAccountTrie(dm, common.Hash{}, &TrieOpts{BaseBlockNumber: 0, CommitGenesis: true})
+	require.NoError(t, err)
+	require.NoError(t, genesis.TryUpdate(addr.Bytes(), randEOA(t, r)))
+	root0, err := genesis.Commit(nil)
+	require.NoError(t, err)
+
+	block1, err := NewFlatAccountTrie(dm, root0, &TrieOpts{BaseBlockNumber: 0})
+	require.NoError(t, err)
+	require.NoError(t, block1.TryUpdate(addr.Bytes(), randEOA(t, r)))
+	root1, err := block1.Commit(nil)
+	require.NoError(t, err)
+
+	return root0, root1
+}
+
 // Trie checking helpers
 type trieInterface interface {
 	GetKey(key []byte) []byte

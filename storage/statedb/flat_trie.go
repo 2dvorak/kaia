@@ -33,6 +33,19 @@ type FlatAccountTrie struct {
 	dt *kaiatrie.DeferredAccountTrie
 
 	baseNum uint64
+
+	// hashErr is the first error encountered while hashing this trie or any of its
+	// storage tries. Because the Trie interface cannot return an error from Hash(),
+	// a failed hash yields a zero hash; hashErr keeps the cause so that callers can
+	// distinguish a local trie failure from a genuinely mismatching state root.
+	hashErr error
+
+	// adoptedRoot, when set, is a root that the caller verified to be this block's
+	// post-state already committed in the domains database (i.e. a previous insertion
+	// of the same block was interrupted after the state commit). The commitment state
+	// cannot be re-hashed from the parent block in that case, so Hash/Commit report
+	// the adopted root and skip the (re-)commit.
+	adoptedRoot *common.Hash
 }
 
 func NewFlatAccountTrie(dm *kaiatrie.DomainsManager, root common.Hash, opts *TrieOpts) (*FlatAccountTrie, error) {
@@ -68,9 +81,35 @@ func (t *FlatAccountTrie) TryDelete(key []byte) error {
 	return t.dt.Put(key, nil)
 }
 
+// setHashError records the first hashing error. Later successes do not clear it
+// because account records updated with a zero storage root may already have been
+// written to the trie.
+func (t *FlatAccountTrie) setHashError(err error) {
+	if t.hashErr == nil {
+		t.hashErr = err
+	}
+}
+
+// HashError returns the first error encountered by Hash() of this trie or any of
+// its storage tries, or nil if hashing has always succeeded.
+func (t *FlatAccountTrie) HashError() error {
+	return t.hashErr
+}
+
+// AdoptCommittedRoot makes Hash/Commit report the given root without touching the
+// domains database. The caller must have verified that the domains database already
+// contains the post-state of the block being inserted with exactly this root.
+func (t *FlatAccountTrie) AdoptCommittedRoot(root common.Hash) {
+	t.adoptedRoot = &root
+}
+
 func (t *FlatAccountTrie) Hash() common.Hash {
+	if t.adoptedRoot != nil {
+		return *t.adoptedRoot
+	}
 	h, err := t.dt.Hash()
 	if err != nil {
+		t.setHashError(err)
 		logger.Error("Failed to hash account trie", "err", err)
 		return common.Hash{}
 	}
@@ -82,6 +121,16 @@ func (t *FlatAccountTrie) HashExt() common.ExtHash {
 }
 
 func (t *FlatAccountTrie) Commit(onleaf LeafCallback) (common.Hash, error) {
+	if t.adoptedRoot != nil {
+		// The domains database already contains this block's post-state; committing
+		// again is neither needed nor possible (the pending updates were never hashed).
+		return *t.adoptedRoot, nil
+	}
+	if t.hashErr != nil {
+		// Never commit state derived from a failed hash; account records may carry
+		// zero storage roots.
+		return common.Hash{}, t.hashErr
+	}
 	h, err := t.dt.Commit()
 	if err != nil {
 		return common.Hash{}, err
@@ -114,9 +163,11 @@ func (t *FlatAccountTrie) Prove(key []byte, fromLevel uint, proofDb database.DBM
 type FlatStorageTrie struct {
 	dm *kaiatrie.DomainsManager
 	dt *kaiatrie.DeferredStorageTrie
+	at *FlatAccountTrie
 
-	addr    common.Address
-	baseNum uint64
+	addr        common.Address
+	baseNum     uint64
+	initialRoot common.Hash
 }
 
 func NewFlatStorageTrie(dm *kaiatrie.DomainsManager, addr common.Address, storageRoot common.Hash, opts *TrieOpts) (*FlatStorageTrie, error) {
@@ -127,7 +178,14 @@ func NewFlatStorageTrie(dm *kaiatrie.DomainsManager, addr common.Address, storag
 		return nil, errors.New("account trie is not set")
 	}
 	dt := kaiatrie.NewDeferredStorageTrie(opts.AccountTrie.dt, addr.Bytes(), storageRoot.Bytes())
-	return &FlatStorageTrie{dm: dm, dt: dt, addr: addr, baseNum: opts.BaseBlockNumber}, nil
+	return &FlatStorageTrie{
+		dm:          dm,
+		dt:          dt,
+		at:          opts.AccountTrie,
+		addr:        addr,
+		baseNum:     opts.BaseBlockNumber,
+		initialRoot: storageRoot,
+	}, nil
 }
 
 func (t *FlatStorageTrie) GetKey(key []byte) []byte {
@@ -160,9 +218,16 @@ func (t *FlatStorageTrie) TryDelete(key []byte) error {
 }
 
 func (t *FlatStorageTrie) Hash() common.Hash {
+	if t.at.adoptedRoot != nil {
+		// The block's post-state is adopted from the domains database; storage roots
+		// are not recomputed. The returned value only ends up in account records that
+		// are discarded, so the pre-block root is a safe placeholder.
+		return t.initialRoot
+	}
 	h, err := t.dt.Hash()
 	if err != nil {
-		logger.Error("Failed to hash storage trie", "err", err)
+		t.at.setHashError(err)
+		logger.Error("Failed to hash storage trie", "addr", t.addr, "err", err)
 		return common.Hash{}
 	}
 	return common.BytesToHash(h[:])

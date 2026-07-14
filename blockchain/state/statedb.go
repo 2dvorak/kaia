@@ -1127,7 +1127,33 @@ func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
 	if EnabledExpensive {
 		defer func(start time.Time) { s.AccountHashes += time.Since(start) }(time.Now())
 	}
-	return s.trie.Hash()
+	root := s.trie.Hash()
+	// A FlatTrie cannot return an error from Hash() and yields a zero hash instead.
+	// Record the cause so that callers treat this as a local failure rather than a
+	// state root mismatch (i.e. never as a bad block).
+	if ft, ok := s.trie.(*statedb.FlatAccountTrie); ok {
+		if err := ft.HashError(); err != nil {
+			s.setError(fmt.Errorf("failed to hash flat trie: %w", err))
+		}
+	}
+	return root
+}
+
+// AdoptCommittedFlatRoot makes the FlatTrie report the given root without hashing or
+// re-committing state. It is used to recover an insertion that was previously
+// interrupted after its state was committed to the domains database but before the
+// chain head advanced: the commitment state can no longer be hashed on top of the
+// parent block, but the committed post-state is provably that of the block being
+// inserted. Returns false when the state is not backed by a FlatTrie.
+// The caller must have verified that the domains database maps root to the block
+// being inserted.
+func (s *StateDB) AdoptCommittedFlatRoot(root common.Hash) bool {
+	ft, ok := s.trie.(*statedb.FlatAccountTrie)
+	if !ok {
+		return false
+	}
+	ft.AdoptCommittedRoot(root)
+	return true
 }
 
 // SetTxContext sets the current transaction hash and index and block hash which is
