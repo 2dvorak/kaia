@@ -20,8 +20,8 @@ cloud.google.com/go/storage v1.0.0/go.mod h1:IhtSnM/ZTZV8YYJWCY8RULGVqBDmpoyjwiy
 cloud.google.com/go/storage v1.5.0/go.mod h1:tpKbwo567HUNpVclU5sGELwQWBDZ8gh0ZeosJ0Rtdos=
 collectd.org v0.3.0/go.mod h1:A/8DzQBkF6abtvrT2j/AU/4tiBgJWYyh0y/oB/4MlWE=
 dmitri.shuralyov.com/gpu/mtl v0.0.0-20190408044501-666a987793e9/go.mod h1:H6x//7gZCb22OMCxBHrMx7a5I7Hp++hsVxbQ4BYO7hU=
-github.com/2dvorak/erigon/erigon-lib v0.0.0-20260714060838-d6cacb64dc9b h1:FdXF6nH4085zILDldAD2M1aXgA9RAW1T6rKPj7BGnlY=
-github.com/2dvorak/erigon/erigon-lib v0.0.0-20260714060838-d6cacb64dc9b/go.mod h1:K+IRchxA0zX8t7YNrHWZSWsHpRCaZSypbCV88u4rjeE=
+github.com/2dvorak/erigon/erigon-lib v0.0.0-20260714075717-6d6976976eb2 h1:dxfujbO3kFc8TkXzHSYASxz/flAeiUiJSONyJnzshD0=
+github.com/2dvorak/erigon/erigon-lib v0.0.0-20260714075717-6d6976976eb2/go.mod h1:K+IRchxA0zX8t7YNrHWZSWsHpRCaZSypbCV88u4rjeE=
 github.com/AndreasBriese/bbloom v0.0.0-20190306092124-e2d15f34fcf9 h1:HD8gA2tkByhMAwYaFAX9w2l7vxvBQ5NMoxDrkhqhtn4=
 github.com/AndreasBriese/bbloom v0.0.0-20190306092124-e2d15f34fcf9/go.mod h1:bOvUY6CB00SOBii9/FifXqc0awNKxLFCL/+pkDPuyl8=
 github.com/AskAlexSharov/bloomfilter/v2 v2.0.9 h1:BuZqNjRlYmcXJIsI7nrIkejYMz9mgFi7ZsNFCbSPpaI=
@@ -396,8 +396,6 @@ github.com/julienschmidt/httprouter v1.3.0 h1:U0609e9tgbseu3rBINet9P48AI/D3oJs4d
 github.com/julienschmidt/httprouter v1.3.0/go.mod h1:JR6WtHb+2LUe8TCKY3cZOxFyyO8IZAc4RVcycCCAKdM=
 github.com/jung-kurt/gofpdf v1.0.3-0.20190309125859-24315acbbda5/go.mod h1:7Id9E/uU8ce6rXgefFLlgrJj/GYY22cpxn+r32jIOes=
 github.com/jwilder/encoding v0.0.0-20170811194829-b4e1701a28ef/go.mod h1:Ct9fl0F6iIOGgxJ5npU/IUOhOhqlVrGjyIZc8/MagT0=
-github.com/kaiachain/kaia-erigon/erigon-lib v0.0.0-20251014143208-04410a8d11b7 h1:IVsQHYkV6G0aX859xW8VxxDK9t6nhRFdzt+Sp0LozFo=
-github.com/kaiachain/kaia-erigon/erigon-lib v0.0.0-20251014143208-04410a8d11b7/go.mod h1:K+IRchxA0zX8t7YNrHWZSWsHpRCaZSypbCV88u4rjeE=
 github.com/kisielk/errcheck v1.2.0/go.mod h1:/BMXB+zMLi60iA8Vv6Ksmxu/1UDYcXs4uQLJ+jE2L00=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
