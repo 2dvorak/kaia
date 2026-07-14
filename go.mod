@@ -3,7 +3,7 @@ module github.com/kaiachain/kaia
 go 1.25.3
 
 replace (
-	github.com/erigontech/erigon-lib => github.com/kaiachain/kaia-erigon/erigon-lib v0.0.0-20251014143208-04410a8d11b7
+	github.com/erigontech/erigon-lib => github.com/2dvorak/erigon/erigon-lib v0.0.0-20260714060838-d6cacb64dc9b
 	github.com/holiman/bloomfilter/v2 => github.com/AskAlexSharov/bloomfilter/v2 v2.0.9
 )
 
