@@ -3,7 +3,7 @@ module github.com/kaiachain/kaia
 go 1.25.3
 
 replace (
-	github.com/erigontech/erigon-lib => github.com/2dvorak/erigon/erigon-lib v0.0.0-20260714060838-d6cacb64dc9b
+	github.com/erigontech/erigon-lib => github.com/2dvorak/erigon/erigon-lib v0.0.0-20260714075717-6d6976976eb2
 	github.com/holiman/bloomfilter/v2 => github.com/AskAlexSharov/bloomfilter/v2 v2.0.9
 )
 
@@ -87,6 +87,7 @@ require (
 	github.com/satori/go.uuid v1.2.0
 	github.com/tyler-smith/go-bip32 v1.0.0
 	github.com/wealdtech/go-eth2-wallet-encryptor-keystorev4 v1.4.1
+	go.uber.org/goleak v1.3.0
 	go.uber.org/mock v0.5.0
 	golang.org/x/sync v0.12.0
 	golang.org/x/time v0.9.0
@@ -186,7 +187,6 @@ require (
 	github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	go.uber.org/goleak v1.3.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go4.org/intern v0.0.0-20211027215823-ae77deb06f29 // indirect
 	go4.org/unsafe/assume-no-moving-gc v0.0.0-20220617031537-928513b29760 // indirect
