@@ -149,6 +149,12 @@ func New(root common.Hash, db Database, snaps *snapshot.Tree, opts *statedb.Trie
 		opts.AccountTrie = at
 	}
 
+	// For PathTrie, supply the account trie to the storage tries so that their
+	// committed node sets are aggregated into one per-block path database update.
+	if pt, ok := tr.(*statedb.PathAccountTrie); ok {
+		opts.PathAccountTrie = pt
+	}
+
 	sdb := &StateDB{
 		db:                       db,
 		trie:                     tr,

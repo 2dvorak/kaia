@@ -29,6 +29,7 @@ import (
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/lru"
 	"github.com/kaiachain/kaia/storage/database"
+	"github.com/kaiachain/kaia/storage/pathstate"
 	"github.com/kaiachain/kaia/storage/statedb"
 )
 
@@ -169,6 +170,8 @@ type cachingDB struct {
 func (db *cachingDB) OpenTrie(root common.Hash, opts *statedb.TrieOpts) (Trie, error) {
 	if dm := db.db.DiskDB().GetDomainsManager(); dm != nil {
 		return statedb.NewFlatAccountTrie(dm, root, opts)
+	} else if kv := db.db.DiskDB().GetPathTrieKV(); kv != nil {
+		return statedb.NewPathAccountTrie(pathstate.ForKV(kv), root, opts)
 	} else {
 		return statedb.NewSecureTrie(root, db.db, opts)
 	}
@@ -178,6 +181,8 @@ func (db *cachingDB) OpenTrie(root common.Hash, opts *statedb.TrieOpts) (Trie, e
 func (db *cachingDB) OpenStorageTrie(addr common.Address, root common.ExtHash, opts *statedb.TrieOpts) (Trie, error) {
 	if dm := db.db.DiskDB().GetDomainsManager(); dm != nil {
 		return statedb.NewFlatStorageTrie(dm, addr, root.Unextend(), opts)
+	} else if kv := db.db.DiskDB().GetPathTrieKV(); kv != nil {
+		return statedb.NewPathStorageTrie(pathstate.ForKV(kv), addr, root.Unextend(), opts)
 	} else {
 		return statedb.NewSecureStorageTrie(root, db.db, opts)
 	}
@@ -197,6 +202,10 @@ func (db *cachingDB) CopyTrie(t Trie) Trie {
 	case *statedb.FlatStorageTrie:
 		// TODO-Kaia-FlatTrie: same sharing caveat as FlatAccountTrie above.
 		return t
+	case *statedb.PathAccountTrie:
+		return t.Copy()
+	case *statedb.PathStorageTrie:
+		return t.Copy()
 	default:
 		panic(fmt.Errorf("unknown trie type %T", t))
 	}

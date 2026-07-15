@@ -29,6 +29,20 @@ func (s *StakingModule) PostInsertBlock(block *types.Block) error {
 		if _, err := s.GetStakingInfo(block.NumberU64()); err != nil {
 			return err
 		}
+		// If this block is a staking update interval boundary, its state is the
+		// staking info source for blocks one interval later. Persist the info
+		// now while the state is available; state backends that retain only
+		// recent states (e.g. the path-based trie) cannot read it afterwards.
+		if num := block.NumberU64(); num > 0 && num%s.stakingInterval == 0 {
+			if ReadStakingInfo(s.ChainKv, num) == nil {
+				si, err := s.getFromStateByNumber(num)
+				if err != nil {
+					return err
+				}
+				WriteStakingInfo(s.ChainKv, num, si)
+				logger.Info("Persisted staking info at update interval boundary", "sourceNum", num)
+			}
+		}
 	}
 	return nil
 }

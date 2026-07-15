@@ -58,6 +58,7 @@ import (
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/kaiachain/kaia/snapshot"
 	"github.com/kaiachain/kaia/storage/database"
+	"github.com/kaiachain/kaia/storage/pathstate"
 	"github.com/kaiachain/kaia/storage/statedb"
 	"github.com/rcrowley/go-metrics"
 )
@@ -1157,6 +1158,13 @@ func (bc *BlockChain) Stop() {
 			logger.Error("Failed to journal state snapshot", "err", err)
 		}
 		bc.snaps.Release()
+	}
+	// Ensure the in-memory path trie layers survive the restart by writing them
+	// into the journal. Afterwards the path database rejects further mutations.
+	if kv := bc.db.GetPathTrieKV(); kv != nil {
+		if err := pathstate.ForKV(kv).Journal(bc.CurrentBlock().Root()); err != nil {
+			logger.Error("Failed to journal path trie database", "err", err)
+		}
 	}
 	triedb := bc.stateCache.TrieDB()
 	if !bc.isArchiveMode() {

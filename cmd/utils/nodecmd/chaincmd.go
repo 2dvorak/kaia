@@ -74,6 +74,7 @@ var (
 			utils.OverridePermissionless,
 			utils.LivePruningFlag,
 			utils.FlatTrieFlag,
+			utils.PathTrieFlag,
 		},
 		Category: "BLOCKCHAIN COMMANDS",
 		Description: `
@@ -150,6 +151,7 @@ func initGenesis(ctx *cli.Context) error {
 	numStateTrieShards := ctx.Uint(utils.NumStateTrieShardsFlag.Name)
 	livePruning := ctx.Bool(utils.LivePruningFlag.Name)
 	useFlatTrie := ctx.Bool(utils.FlatTrieFlag.Name)
+	usePathTrie := ctx.Bool(utils.PathTrieFlag.Name)
 
 	dbtype := database.DBType(ctx.String(utils.DbTypeFlag.Name)).ToValid()
 	if len(dbtype) == 0 {
@@ -188,7 +190,7 @@ func initGenesis(ctx *cli.Context) error {
 			SingleDB: singleDB, NumStateTrieShards: numStateTrieShards,
 			LevelDBCacheSize: 0, PebbleDBCacheSize: 0, OpenFilesLimit: 0,
 			DynamoDBConfig: dynamoDBConfig, RocksDBConfig: rocksDBConfig,
-			UseFlatTrie: useFlatTrie,
+			UseFlatTrie: useFlatTrie, UsePathTrie: usePathTrie,
 		}
 		chainDB := stack.OpenDatabase(dbc)
 

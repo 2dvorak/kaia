@@ -226,6 +226,7 @@ var CommonNodeFlags = []cli.Flag{
 	altsrc.NewBoolFlag(LivePruningFlag),
 	altsrc.NewUint64Flag(LivePruningRetentionFlag),
 	altsrc.NewBoolFlag(FlatTrieFlag),
+	altsrc.NewBoolFlag(PathTrieFlag),
 	altsrc.NewIntFlag(CacheTypeFlag),
 	altsrc.NewIntFlag(CacheScaleFlag),
 	altsrc.NewStringFlag(CacheUsageLevelFlag),

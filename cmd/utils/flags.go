@@ -577,6 +577,13 @@ var (
 		EnvVars:  []string{"KLAYTN_STATE_FLAT_TRIE", "KAIA_STATE_FLAT_TRIE"},
 		Category: "STATE",
 	}
+	PathTrieFlag = &cli.BoolFlag{
+		Name:     "state.experimental-path-trie",
+		Usage:    "(experimental) Enable path-based trie scheme (PBSS)",
+		Aliases:  []string{},
+		EnvVars:  []string{"KLAYTN_STATE_PATH_TRIE", "KAIA_STATE_PATH_TRIE"},
+		Category: "STATE",
+	}
 	CacheTypeFlag = &cli.IntFlag{
 		Name:     "cache.type",
 		Usage:    "Cache Type: 0=LRUCache, 1=LRUShardCache, 2=FIFOCache",

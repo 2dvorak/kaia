@@ -46,6 +46,9 @@ type TrieOpts struct {
 	CommitGenesis bool
 	// Parent account trie, required for FlatStorageTrie.
 	AccountTrie *FlatAccountTrie
+
+	// Parent account trie, required for PathStorageTrie.
+	PathAccountTrie *PathAccountTrie
 }
 
 // LeafCallback is a callback type invoked when a trie operation reaches a leaf

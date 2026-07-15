@@ -82,6 +82,7 @@ type DBManager interface {
 	GetTxLookupEntryDB() Database
 	GetSnapshotDB() Database
 	GetDomainsManager() *kaiatrie.DomainsManager
+	GetPathTrieKV() Database
 
 	// from accessors_chain.go
 	ReadCanonicalHash(number uint64) common.Hash
@@ -426,10 +427,11 @@ func getDBEntryConfig(originalDBC *DBConfig, i DBEntryType, dbDir string) *DBCon
 }
 
 type databaseManager struct {
-	config *DBConfig
-	dbs    []Database
-	cm     *cacheManager
-	dm     *kaiatrie.DomainsManager
+	config     *DBConfig
+	dbs        []Database
+	cm         *cacheManager
+	dm         *kaiatrie.DomainsManager
+	pathTrieKV Database
 
 	// TODO-Kaia need to refine below.
 	// -merge status variable
@@ -479,6 +481,9 @@ type DBConfig struct {
 
 	// FlatTrie related configurations
 	UseFlatTrie bool
+
+	// PathTrie (PBSS) related configurations
+	UsePathTrie bool
 }
 
 const dbMetricPrefix = "klay/db/chaindata/"
@@ -562,6 +567,19 @@ func databaseDBManager(dbc *DBConfig) (*databaseManager, error) {
 			logger.Crit("Failed to create domains manager", "err", err)
 		}
 		dbm.dm = dm
+	}
+
+	if dbc.UsePathTrie {
+		// PathTrie (PBSS) keeps path-keyed trie nodes in a dedicated key-value store,
+		// sized like the state trie partition.
+		newDBC := getDBEntryConfig(dbc, StateTrieDB, "pathtrie")
+		logger.Info("Opening PathTrie key-value store", "dir", newDBC.Dir)
+		kv, err := newDatabase(newDBC, StateTrieDB)
+		if err != nil {
+			logger.Crit("Failed to create the PathTrie key-value store", "err", err)
+		}
+		kv.Meter(dbMetricPrefix + "pathtrie/")
+		dbm.pathTrieKV = kv
 	}
 
 	return dbm, nil
@@ -956,6 +974,12 @@ func (dbm *databaseManager) GetDomainsManager() *kaiatrie.DomainsManager {
 	return dbm.dm
 }
 
+// GetPathTrieKV returns the dedicated key-value store for the path-based trie
+// scheme (PBSS), or nil if the path trie is not enabled.
+func (dbm *databaseManager) GetPathTrieKV() Database {
+	return dbm.pathTrieKV
+}
+
 func (dbm *databaseManager) TryCatchUpWithPrimary() error {
 	for _, db := range dbm.dbs {
 		if db != nil {
@@ -1048,6 +1072,11 @@ func (dbm *databaseManager) Close() {
 	if dbm.dm != nil {
 		logger.Info("Closing MDBX domains manager")
 		dbm.dm.Close()
+	}
+
+	if dbm.pathTrieKV != nil {
+		logger.Info("Closing PathTrie key-value store")
+		dbm.pathTrieKV.Close()
 	}
 }
 

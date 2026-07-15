@@ -40,6 +40,7 @@ import (
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/kaiachain/kaia/storage/database"
+	"github.com/kaiachain/kaia/storage/pathstate"
 	"github.com/kaiachain/kaia/storage/statedb"
 )
 
@@ -264,7 +265,10 @@ func SetupGenesisBlockWithOverride(db database.DBManager, genesis *Genesis, over
 		// The genesis block is present in the database but the corresponding state might not.
 		// Because the trie can be partially corrupted, we always commit the trie.
 		// It can happen in a state migrated database or live pruned database.
-		if db.GetDomainsManager() == nil { // FlatTrie disallows re-commiting the block lower than the head block.
+		// FlatTrie disallows re-commiting the block lower than the head block.
+		// PathTrie only allows re-commiting genesis into an uninitialized path database;
+		// once layers exist, re-adding a genesis layer on top would fail.
+		if db.GetDomainsManager() == nil && !pathTrieInitialized(db) {
 			if err := commitGenesisState(genesis, db, overrides); err != nil {
 				return nil, common.Hash{}, err
 			}
@@ -523,6 +527,16 @@ func decodePrealloc(data string) GenesisAlloc {
 		ga[common.BigToAddress(account.Addr)] = GenesisAccount{Balance: account.Balance}
 	}
 	return ga
+}
+
+// pathTrieInitialized reports whether the path-based trie scheme is enabled and
+// its database already holds a state (in which case genesis must not be re-committed).
+func pathTrieInitialized(db database.DBManager) bool {
+	kv := db.GetPathTrieKV()
+	if kv == nil {
+		return false
+	}
+	return pathstate.ForKV(kv).Initialized()
 }
 
 func commitGenesisState(genesis *Genesis, db database.DBManager, overrides *ChainOverrides) error {

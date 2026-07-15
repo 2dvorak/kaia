@@ -204,6 +204,9 @@ type Config struct {
 	// Use flat trie scheme
 	UseFlatTrie bool
 
+	// Use path-based trie scheme (PBSS)
+	UsePathTrie bool
+
 	// Kaiax configs
 	Gasless *gasless.GaslessConfig
 	Auction *auction.AuctionConfig

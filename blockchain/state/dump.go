@@ -56,13 +56,24 @@ func (self *StateDB) RawDump() Dump {
 	it := statedb.NewIterator(self.trie.NodeIterator(nil))
 	for it.Next() {
 		addr := self.trie.GetKey(it.Key)
+		// Tries without preimage records (e.g. the path-based trie) cannot map
+		// hashed keys back to addresses. Fall back to the hashed key so every
+		// account still gets a distinct entry (balances stay correct for
+		// consumers like the supply module), and skip address-dependent fields.
+		addrKey := addr
+		if addrKey == nil {
+			addrKey = it.Key
+		}
 		serializer := account.NewAccountSerializer()
 		if err := rlp.DecodeBytes(it.Value, serializer); err != nil {
 			panic(err)
 		}
 		data := serializer.GetAccount()
 
-		obj := self.getStateObject(common.BytesToAddress(addr))
+		var obj *stateObject
+		if addr != nil {
+			obj = self.getStateObject(common.BytesToAddress(addr))
+		}
 		acc := DumpAccount{
 			Balance:  data.GetBalance().String(),
 			Nonce:    data.GetNonce(),
@@ -74,17 +85,25 @@ func (self *StateDB) RawDump() Dump {
 		if pa := account.GetProgramAccount(data); pa != nil {
 			acc.Root = common.Bytes2Hex(pa.GetStorageRoot().Unextend().Bytes())
 			acc.CodeHash = common.Bytes2Hex(pa.GetCodeHash())
-			acc.Code = common.Bytes2Hex(obj.Code(self.db))
+			if obj != nil {
+				acc.Code = common.Bytes2Hex(obj.Code(self.db))
+			}
 		} else {
 			acc.Root = common.Bytes2Hex(types.EmptyRootHash.Bytes())
 			acc.CodeHash = common.Bytes2Hex(emptyCodeHash)
 		}
-		storageTrie := obj.getStorageTrie(self.db)
-		storageIt := statedb.NewIterator(storageTrie.NodeIterator(nil))
-		for storageIt.Next() {
-			acc.Storage[common.Bytes2Hex(storageTrie.GetKey(storageIt.Key))] = common.Bytes2Hex(storageIt.Value)
+		if obj != nil {
+			storageTrie := obj.getStorageTrie(self.db)
+			storageIt := statedb.NewIterator(storageTrie.NodeIterator(nil))
+			for storageIt.Next() {
+				storageKey := storageTrie.GetKey(storageIt.Key)
+				if storageKey == nil {
+					storageKey = storageIt.Key
+				}
+				acc.Storage[common.Bytes2Hex(storageKey)] = common.Bytes2Hex(storageIt.Value)
+			}
 		}
-		dump.Accounts[common.Bytes2Hex(addr)] = acc
+		dump.Accounts[common.Bytes2Hex(addrKey)] = acc
 	}
 	return dump
 }
