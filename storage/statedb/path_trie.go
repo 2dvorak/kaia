@@ -43,9 +43,19 @@ type PathAccountTrie struct {
 	// persistent disk layer so genesis survives without a journal.
 	commitGenesis bool
 
+	// baseNum is the block number of parentRoot (from the root index);
+	// parentKnown records whether it could be resolved. The committed block
+	// is baseNum+1 (or 0 for genesis).
+	baseNum     uint64
+	parentKnown bool
+
 	// storageNodes collects the node sets committed by this block's storage
 	// tries; they are merged with the account node set on Commit.
 	storageNodes []*trienode.NodeSet
+
+	// history collects this block's value changes when archive mode is
+	// enabled (nil otherwise); flushed on Commit.
+	history *pathstate.BlockHistory
 }
 
 func NewPathAccountTrie(db *pathstate.Database, root common.Hash, opts *TrieOpts) (*PathAccountTrie, error) {
@@ -53,12 +63,23 @@ func NewPathAccountTrie(db *pathstate.Database, root common.Hash, opts *TrieOpts
 	if err != nil {
 		return nil, err
 	}
-	return &PathAccountTrie{
+	parentRoot := pathtrie.TrieRootHash(root)
+	baseNum, parentKnown := db.BlockOfRoot(parentRoot)
+	if parentRoot == pathtrie.EmptyRootHash {
+		parentKnown = true // genesis parent
+	}
+	t := &PathAccountTrie{
 		db:            db,
 		trie:          tr,
-		parentRoot:    pathtrie.TrieRootHash(root),
+		parentRoot:    parentRoot,
 		commitGenesis: opts != nil && opts.CommitGenesis,
-	}, nil
+		baseNum:       baseNum,
+		parentKnown:   parentKnown,
+	}
+	if db.ArchiveEnabled() {
+		t.history = pathstate.NewBlockHistory()
+	}
+	return t, nil
 }
 
 func (t *PathAccountTrie) GetKey(key []byte) []byte {
@@ -71,6 +92,9 @@ func (t *PathAccountTrie) TryGet(key []byte) ([]byte, error) {
 }
 
 func (t *PathAccountTrie) TryUpdate(key, value []byte) error {
+	if t.history != nil {
+		t.history.AddAccount(crypto.Keccak256Hash(key), value)
+	}
 	return t.trie.Update(key, value)
 }
 
@@ -79,6 +103,13 @@ func (t *PathAccountTrie) TryUpdateWithKeys(key, hashKey, hexKey, value []byte) 
 }
 
 func (t *PathAccountTrie) TryDelete(key []byte) error {
+	if t.history != nil {
+		addrHash := crypto.Keccak256Hash(key)
+		t.history.AddAccount(addrHash, nil)
+		// Account deletion wipes its storage; record a barrier so historic
+		// reads of a later re-created account do not resurrect old slots.
+		t.history.AddWipe(addrHash)
+	}
 	return t.trie.Delete(key)
 }
 
@@ -123,8 +154,20 @@ func (t *PathAccountTrie) Commit(onleaf LeafCallback) (common.Hash, error) {
 		// No state transition; there is no layer to add.
 		return root, nil
 	}
-	if err := t.db.Update(root, t.parentRoot, merged); err != nil {
+	block := t.baseNum + 1
+	if t.commitGenesis {
+		block = 0
+	} else if err := t.db.CheckArchiveConsistency(t.parentRoot, t.parentKnown); err != nil {
 		return common.Hash{}, err
+	}
+	if err := t.db.Update(root, t.parentRoot, block, merged); err != nil {
+		return common.Hash{}, err
+	}
+	if t.history != nil {
+		if err := t.db.WriteBlockHistory(block, t.history); err != nil {
+			return common.Hash{}, err
+		}
+		t.history = pathstate.NewBlockHistory()
 	}
 	if t.commitGenesis {
 		if err := t.db.Commit(root); err != nil {
@@ -158,12 +201,16 @@ func (t *PathAccountTrie) Prove(key []byte, fromLevel uint, proofDb database.DBM
 
 // Copy returns a copy sharing the path database handle and the pending
 // storage node sets registry; the trie itself is independently copied.
+// The copy does NOT record archive history: copies serve tracers and
+// read-only forks, and the original trie is the committing instance.
 func (t *PathAccountTrie) Copy() *PathAccountTrie {
 	return &PathAccountTrie{
 		db:            t.db,
 		trie:          t.trie.Copy(),
 		parentRoot:    t.parentRoot,
 		commitGenesis: t.commitGenesis,
+		baseNum:       t.baseNum,
+		parentKnown:   t.parentKnown,
 		storageNodes:  append([]*trienode.NodeSet{}, t.storageNodes...),
 	}
 }
@@ -172,9 +219,10 @@ func (t *PathAccountTrie) Copy() *PathAccountTrie {
 // scheme. Its committed node set is handed to the parent PathAccountTrie,
 // which pushes one aggregated layer per block into the path database.
 type PathStorageTrie struct {
-	trie *pathtrie.StateTrie
-	at   *PathAccountTrie
-	addr common.Address
+	trie  *pathtrie.StateTrie
+	at    *PathAccountTrie
+	addr  common.Address
+	owner common.Hash // keccak256(addr), the trie owner and history key
 }
 
 func NewPathStorageTrie(db *pathstate.Database, addr common.Address, root common.Hash, opts *TrieOpts) (*PathStorageTrie, error) {
@@ -187,7 +235,7 @@ func NewPathStorageTrie(db *pathstate.Database, addr common.Address, root common
 	if err != nil {
 		return nil, err
 	}
-	return &PathStorageTrie{trie: tr, at: at, addr: addr}, nil
+	return &PathStorageTrie{trie: tr, at: at, addr: addr, owner: owner}, nil
 }
 
 func (t *PathStorageTrie) GetKey(key []byte) []byte {
@@ -199,6 +247,9 @@ func (t *PathStorageTrie) TryGet(key []byte) ([]byte, error) {
 }
 
 func (t *PathStorageTrie) TryUpdate(key, value []byte) error {
+	if t.at.history != nil {
+		t.at.history.AddStorage(t.owner, crypto.Keccak256Hash(key), value)
+	}
 	return t.trie.Update(key, value)
 }
 
@@ -207,6 +258,9 @@ func (t *PathStorageTrie) TryUpdateWithKeys(key, hashKey, hexKey, value []byte) 
 }
 
 func (t *PathStorageTrie) TryDelete(key []byte) error {
+	if t.at.history != nil {
+		t.at.history.AddStorage(t.owner, crypto.Keccak256Hash(key), nil)
+	}
 	return t.trie.Delete(key)
 }
 
@@ -257,7 +311,7 @@ func (t *PathStorageTrie) Prove(key []byte, fromLevel uint, proofDb database.DBM
 // both the original and the copy would register the node set twice, so copies
 // are only safe for read access (mirrors the FlatStorageTrie caveat).
 func (t *PathStorageTrie) Copy() *PathStorageTrie {
-	return &PathStorageTrie{trie: t.trie.Copy(), at: t.at, addr: t.addr}
+	return &PathStorageTrie{trie: t.trie.Copy(), at: t.at, addr: t.addr, owner: t.owner}
 }
 
 // pathNodeIterator adapts the path trie package's node iterator to Kaia's

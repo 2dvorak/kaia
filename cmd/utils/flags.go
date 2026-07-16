@@ -584,6 +584,13 @@ var (
 		EnvVars:  []string{"KLAYTN_STATE_PATH_TRIE", "KAIA_STATE_PATH_TRIE"},
 		Category: "STATE",
 	}
+	PathTrieArchiveFlag = &cli.BoolFlag{
+		Name:     "state.experimental-path-trie-archive",
+		Usage:    "(experimental) Record value history for archive queries under the path-based trie scheme (implies --state.experimental-path-trie)",
+		Aliases:  []string{},
+		EnvVars:  []string{"KLAYTN_STATE_PATH_TRIE_ARCHIVE", "KAIA_STATE_PATH_TRIE_ARCHIVE"},
+		Category: "STATE",
+	}
 	CacheTypeFlag = &cli.IntFlag{
 		Name:     "cache.type",
 		Usage:    "Cache Type: 0=LRUCache, 1=LRUShardCache, 2=FIFOCache",

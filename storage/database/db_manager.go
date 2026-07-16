@@ -483,7 +483,8 @@ type DBConfig struct {
 	UseFlatTrie bool
 
 	// PathTrie (PBSS) related configurations
-	UsePathTrie bool
+	UsePathTrie        bool
+	UsePathTrieArchive bool
 }
 
 const dbMetricPrefix = "klay/db/chaindata/"
@@ -579,6 +580,14 @@ func databaseDBManager(dbc *DBConfig) (*databaseManager, error) {
 			logger.Crit("Failed to create the PathTrie key-value store", "err", err)
 		}
 		kv.Meter(dbMetricPrefix + "pathtrie/")
+		if dbc.UsePathTrieArchive {
+			// Mark the store as archive-enabled before any use. The key must
+			// match pathstate.ArchiveMarkerKey (storage/pathstate cannot be
+			// imported here without an import cycle).
+			if err := kv.Put([]byte("PathTrieArchiveEnabled"), []byte{1}); err != nil {
+				logger.Crit("Failed to write the PathTrie archive marker", "err", err)
+			}
+		}
 		dbm.pathTrieKV = kv
 	}
 

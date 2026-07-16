@@ -155,6 +155,11 @@ func New(root common.Hash, db Database, snaps *snapshot.Tree, opts *statedb.Trie
 		opts.PathAccountTrie = pt
 	}
 
+	// For historic path-trie states, storage tries need the resolved block number.
+	if ht, ok := tr.(*statedb.HistoricPathTrie); ok {
+		opts.HistoricAccountTrie = ht
+	}
+
 	sdb := &StateDB{
 		db:                       db,
 		trie:                     tr,

@@ -207,6 +207,9 @@ type Config struct {
 	// Use path-based trie scheme (PBSS)
 	UsePathTrie bool
 
+	// Record value history for archive queries under the path-based trie scheme
+	UsePathTrieArchive bool
+
 	// Kaiax configs
 	Gasless *gasless.GaslessConfig
 	Auction *auction.AuctionConfig

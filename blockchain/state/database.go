@@ -171,7 +171,14 @@ func (db *cachingDB) OpenTrie(root common.Hash, opts *statedb.TrieOpts) (Trie, e
 	if dm := db.db.DiskDB().GetDomainsManager(); dm != nil {
 		return statedb.NewFlatAccountTrie(dm, root, opts)
 	} else if kv := db.db.DiskDB().GetPathTrieKV(); kv != nil {
-		return statedb.NewPathAccountTrie(pathstate.ForKV(kv), root, opts)
+		psdb := pathstate.ForKV(kv)
+		tr, err := statedb.NewPathAccountTrie(psdb, root, opts)
+		if err != nil && psdb.ArchiveEnabled() {
+			// The root is older than the live layers; serve it read-only
+			// from the archive value history.
+			return statedb.NewHistoricPathTrie(psdb, root, opts)
+		}
+		return tr, err
 	} else {
 		return statedb.NewSecureTrie(root, db.db, opts)
 	}
@@ -182,6 +189,9 @@ func (db *cachingDB) OpenStorageTrie(addr common.Address, root common.ExtHash, o
 	if dm := db.db.DiskDB().GetDomainsManager(); dm != nil {
 		return statedb.NewFlatStorageTrie(dm, addr, root.Unextend(), opts)
 	} else if kv := db.db.DiskDB().GetPathTrieKV(); kv != nil {
+		if opts != nil && opts.HistoricAccountTrie != nil {
+			return statedb.NewHistoricStorageTrie(pathstate.ForKV(kv), addr, root.Unextend(), opts)
+		}
 		return statedb.NewPathStorageTrie(pathstate.ForKV(kv), addr, root.Unextend(), opts)
 	} else {
 		return statedb.NewSecureStorageTrie(root, db.db, opts)
@@ -206,6 +216,10 @@ func (db *cachingDB) CopyTrie(t Trie) Trie {
 		return t.Copy()
 	case *statedb.PathStorageTrie:
 		return t.Copy()
+	case *statedb.HistoricPathTrie:
+		return t // read-only, safe to share
+	case *statedb.HistoricStorageTrie:
+		return t // read-only, safe to share
 	default:
 		panic(fmt.Errorf("unknown trie type %T", t))
 	}

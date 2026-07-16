@@ -712,10 +712,16 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 
 	if ctx.IsSet(PathTrieFlag.Name) {
 		cfg.UsePathTrie = ctx.Bool(PathTrieFlag.Name)
-		if cfg.UsePathTrie && cfg.UseFlatTrie {
+	}
+	if ctx.IsSet(PathTrieArchiveFlag.Name) && ctx.Bool(PathTrieArchiveFlag.Name) {
+		cfg.UsePathTrieArchive = true
+		cfg.UsePathTrie = true
+	}
+	if cfg.UsePathTrie {
+		if cfg.UseFlatTrie {
 			logger.Crit("--state.experimental-path-trie and --state.experimental-flat-trie are mutually exclusive")
 		}
-		if cfg.UsePathTrie && cfg.LivePruning {
+		if cfg.LivePruning {
 			logger.Crit("--state.experimental-path-trie cannot be used with --state.live-pruning")
 		}
 	}

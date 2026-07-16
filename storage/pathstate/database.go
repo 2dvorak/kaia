@@ -20,6 +20,7 @@ import (
 	"sync"
 
 	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/storage/database"
 	"github.com/kaiachain/kaia/storage/pathstate/pathdb"
 	"github.com/kaiachain/kaia/storage/pathstate/trie"
@@ -27,11 +28,16 @@ import (
 	"github.com/kaiachain/kaia/storage/pathstate/triestate"
 )
 
+var logger = log.NewModuleLogger(log.StorageStateDB)
+
 // Database ties the ported path-based trie database (pathdb) to Kaia. It
 // satisfies the path trie package's backing-database interface and mediates
-// per-block state updates into the layered path database.
+// per-block state updates into the layered path database. In archive mode it
+// additionally records a per-block value history (see history.go).
 type Database struct {
-	pdb *pathdb.Database
+	pdb     *pathdb.Database
+	kv      database.Database
+	archive bool
 }
 
 var (
@@ -48,7 +54,12 @@ func ForKV(kv database.Database) *Database {
 	if db, ok := registry[kv]; ok {
 		return db
 	}
-	db := &Database{pdb: pathdb.New(kv, nil)}
+	archive := false
+	if has, err := kv.Has(ArchiveMarkerKey); err == nil && has {
+		archive = true
+		logger.Info("Path trie store is archive-enabled; recording value history")
+	}
+	db := &Database{pdb: pathdb.New(kv, nil), kv: kv, archive: archive}
 	registry[kv] = db
 	return db
 }
@@ -59,10 +70,14 @@ func (db *Database) Reader(root common.Hash) (trie.Reader, error) {
 }
 
 // Update applies the merged dirty node set of one block on top of its parent
-// state. Kaia is instant-final, so no state history is retained; the block
-// number recorded with the layer is informational only.
-func (db *Database) Update(root, parentRoot common.Hash, nodes *trienode.MergedNodeSet) error {
-	return db.pdb.Update(trie.TrieRootHash(root), trie.TrieRootHash(parentRoot), 0, nodes, emptyStates())
+// state, and indexes the new root's block number. Kaia is instant-final, so
+// no reorg rollback history is retained by the layer tree itself.
+func (db *Database) Update(root, parentRoot common.Hash, block uint64, nodes *trienode.MergedNodeSet) error {
+	if err := db.pdb.Update(trie.TrieRootHash(root), trie.TrieRootHash(parentRoot), block, nodes, emptyStates()); err != nil {
+		return err
+	}
+	db.writeRootIndex(trie.TrieRootHash(root), block)
+	return nil
 }
 
 // Commit flattens all in-memory layers down to the persistent disk layer.

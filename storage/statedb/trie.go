@@ -49,6 +49,9 @@ type TrieOpts struct {
 
 	// Parent account trie, required for PathStorageTrie.
 	PathAccountTrie *PathAccountTrie
+
+	// Parent historic account trie, required for HistoricStorageTrie.
+	HistoricAccountTrie *HistoricPathTrie
 }
 
 // LeafCallback is a callback type invoked when a trie operation reaches a leaf
