@@ -108,6 +108,11 @@ type syncMemBatch struct {
 	codes map[common.Hash][]byte // In-memory membatch of recently completed codes
 }
 
+type (
+	syncNodeExistKey common.Hash
+	syncCodeExistKey common.Hash
+)
+
 // newSyncMemBatch allocates a new memory-buffer for not-yet persisted trie nodes.
 func newSyncMemBatch() *syncMemBatch {
 	return &syncMemBatch{
@@ -179,7 +184,7 @@ func (s *TrieSync) AddSubTrie(root common.Hash, path []byte, depth int, parent c
 		return
 	}
 	if s.exist != nil {
-		if _, ok := s.exist.Get(root); ok {
+		if _, ok := s.exist.Get(syncNodeExistKey(root)); ok {
 			// already written in migration, skip the node
 			return
 		}
@@ -225,7 +230,7 @@ func (s *TrieSync) AddCodeEntry(hash common.Hash, path []byte, depth int, parent
 		return
 	}
 	if s.exist != nil {
-		if _, ok := s.exist.Get(hash); ok {
+		if _, ok := s.exist.Get(syncCodeExistKey(hash)); ok {
 			// already written in migration, skip the node
 			return
 		}
@@ -356,7 +361,7 @@ func (s *TrieSync) Commit(dbw database.Batch) (int, error) {
 			s.bloom.Add(key[:])
 		}
 		if s.exist != nil {
-			s.exist.Add(key, nil)
+			s.exist.Add(syncNodeExistKey(key), nil)
 		}
 		written += 1
 	}
@@ -368,7 +373,7 @@ func (s *TrieSync) Commit(dbw database.Batch) (int, error) {
 			s.bloom.Add(key[:])
 		}
 		if s.exist != nil {
-			s.exist.Add(key, nil)
+			s.exist.Add(syncCodeExistKey(key), nil)
 		}
 		written += 1
 	}
@@ -475,7 +480,7 @@ func (s *TrieSync) children(req *request, object node) ([]*request, error) {
 				continue
 			}
 			if s.exist != nil {
-				if _, ok := s.exist.Get(hash); ok {
+				if _, ok := s.exist.Get(syncNodeExistKey(hash)); ok {
 					// already written in migration, skip the node
 					continue
 				}
