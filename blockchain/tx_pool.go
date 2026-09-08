@@ -1367,8 +1367,6 @@ func (pool *TxPool) HandleTxMsg(txs types.Transactions) {
 		}
 	}
 
-	// TODO-Kaia: Consider removing the next line and move the above logic to `addTx` or `AddRemotes`
-	senderCacher.recover(pool.signer, txs)
 	pool.txMsgCh <- txs
 }
 

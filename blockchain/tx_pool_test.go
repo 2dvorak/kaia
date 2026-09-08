@@ -340,6 +340,29 @@ func setupTxPoolWithConfig(config *params.ChainConfig) (*TxPool, *ecdsa.PrivateK
 	return pool, key
 }
 
+func TestHandleTxMsgDefersSenderRecovery(t *testing.T) {
+	original := senderCacher
+	blocked := &txSenderCacher{threads: 1, tasks: make(chan *txSenderCacherRequest, 1)}
+	blocked.tasks <- &txSenderCacherRequest{}
+	senderCacher = blocked
+	defer func() { senderCacher = original }()
+
+	pool := &TxPool{txMsgCh: make(chan types.Transactions, 1)}
+	done := make(chan struct{})
+	go func() {
+		pool.HandleTxMsg(types.Transactions{nil})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		<-blocked.tasks
+		<-done
+		t.Fatal("HandleTxMsg performed sender recovery before queueing")
+	}
+}
+
 func setupTxPoolWithBlobStorage(t *testing.T) (*TxPool, *testBlockChain, *ecdsa.PrivateKey, string) {
 	tmpDir := t.TempDir()
 	config := testTxPoolConfig
