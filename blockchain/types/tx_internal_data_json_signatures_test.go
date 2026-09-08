@@ -23,11 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestTxInternalDataUnmarshalJSONEmptySignatures ensures that decoding a JSON
-// transaction with a missing, empty, or null "signatures" field returns an
-// error instead of panicking. Such payloads can be produced by a malicious or
-// tampered JSON-RPC endpoint, and the decoders must not index into an empty
-// TxSignatures slice.
 func TestTxInternalDataUnmarshalJSONEmptySignatures(t *testing.T) {
 	types := []struct {
 		name string
@@ -38,19 +33,19 @@ func TestTxInternalDataUnmarshalJSONEmptySignatures(t *testing.T) {
 		{"EthereumDynamicFee", genDynamicFeeTransaction},
 		{"EthereumSetCode", genSetCodeTransaction},
 		{"EthereumBlob", genBlobTransaction},
+		{"ValueTransfer", genValueTransferTransaction},
+		{"FeeDelegatedValueTransfer", genFeeDelegatedValueTransferTransaction},
 	}
 
-	// Each malformed "signatures" value that must be rejected gracefully.
 	malformed := map[string]interface{}{
-		"empty":   []interface{}{},    // "signatures": []
-		"null":    []interface{}{nil}, // "signatures": [null]
-		"missing": nil,                // "signatures" key absent
+		"empty":   []interface{}{},
+		"null":    []interface{}{nil},
+		"missing": nil,
 	}
 
 	for _, tt := range types {
 		for sigName, sigValue := range malformed {
 			t.Run(tt.name+"/"+sigName, func(t *testing.T) {
-				// Marshal a well-formed transaction, then tamper the signatures field.
 				raw, err := json.Marshal(tt.gen())
 				require.NoError(t, err)
 
@@ -64,8 +59,6 @@ func TestTxInternalDataUnmarshalJSONEmptySignatures(t *testing.T) {
 				tampered, err := json.Marshal(m)
 				require.NoError(t, err)
 
-				// Decoding must not panic and must be rejected specifically
-				// by the empty-signatures guard.
 				dec := newTxInternalDataSerializer()
 				require.NotPanics(t, func() {
 					err = json.Unmarshal(tampered, dec)
@@ -73,5 +66,36 @@ func TestTxInternalDataUnmarshalJSONEmptySignatures(t *testing.T) {
 				require.ErrorIs(t, err, errEmptyTxSignatures)
 			})
 		}
+	}
+}
+
+func TestTxInternalDataUnmarshalJSONEmptyFeePayerSignatures(t *testing.T) {
+	malformed := map[string]interface{}{
+		"empty":   []interface{}{},
+		"null":    []interface{}{nil},
+		"missing": nil,
+	}
+
+	for sigName, sigValue := range malformed {
+		t.Run(sigName, func(t *testing.T) {
+			raw, err := json.Marshal(genFeeDelegatedValueTransferTransaction())
+			require.NoError(t, err)
+
+			var m map[string]interface{}
+			require.NoError(t, json.Unmarshal(raw, &m))
+			if sigName == "missing" {
+				delete(m, "feePayerSignatures")
+			} else {
+				m["feePayerSignatures"] = sigValue
+			}
+			tampered, err := json.Marshal(m)
+			require.NoError(t, err)
+
+			dec := newTxInternalDataSerializer()
+			require.NotPanics(t, func() {
+				err = json.Unmarshal(tampered, dec)
+			})
+			require.ErrorIs(t, err, errEmptyTxSignatures)
+		})
 	}
 }
