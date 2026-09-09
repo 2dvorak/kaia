@@ -59,6 +59,12 @@ func init() {
 	}
 }
 
+func newPrometheusMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	return mux
+}
+
 // StartMetricCollectionAndExport starts exporting to prometheus and collects process metrics.
 func StartMetricCollectionAndExport(ctx *cli.Context) {
 	metricsCollectionInterval := 3 * time.Second
@@ -70,13 +76,10 @@ func StartMetricCollectionAndExport(ctx *cli.Context) {
 				"", prometheus.DefaultRegisterer, metricsCollectionInterval)
 			go pClient.UpdatePrometheusMetrics()
 
-			// Use a private mux, not http.DefaultServeMux, so net/http/pprof's
-			// globally-registered /debug/pprof/* is not exposed on this port.
-			mux := http.NewServeMux()
-			mux.Handle("/metrics", promhttp.Handler())
 			port := ctx.Int(PrometheusExporterPortFlag)
 
-			server := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux}
+			// Use a private mux so globally registered handlers are not exposed.
+			server := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: newPrometheusMux()}
 			go func() {
 				if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 					logger.Error("PrometheusExporter starting failed:", "port", port, "err", err)
