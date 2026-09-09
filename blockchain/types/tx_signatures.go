@@ -169,12 +169,9 @@ func (t *TxSignaturesJSON) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &sigs); err != nil {
 		return err
 	}
-	if len(sigs) == 0 {
-		return errEmptyTxSignatures
-	}
 	for _, sig := range sigs {
 		if sig == nil || sig.V == nil || sig.R == nil || sig.S == nil {
-			return errEmptyTxSignatures
+			return errInvalidTxSignatureJSON
 		}
 	}
 	*t = sigs

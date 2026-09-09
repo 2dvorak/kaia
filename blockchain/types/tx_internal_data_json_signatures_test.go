@@ -37,14 +37,19 @@ func TestTxInternalDataUnmarshalJSONEmptySignatures(t *testing.T) {
 		{"FeeDelegatedValueTransfer", genFeeDelegatedValueTransferTransaction},
 	}
 
-	malformed := map[string]interface{}{
-		"empty":   []interface{}{},
-		"null":    []interface{}{nil},
-		"missing": nil,
+	testcases := map[string]struct {
+		value       interface{}
+		expectedErr error
+	}{
+		"empty":           {[]interface{}{}, errEmptyTxSignatures},
+		"null_element":    {[]interface{}{nil}, errInvalidTxSignatureJSON},
+		"empty_element":   {[]interface{}{map[string]interface{}{}}, errInvalidTxSignatureJSON},
+		"partial_element": {[]interface{}{map[string]interface{}{"V": "0x1"}}, errInvalidTxSignatureJSON},
+		"missing":         {nil, errEmptyTxSignatures},
 	}
 
 	for _, tt := range types {
-		for sigName, sigValue := range malformed {
+		for sigName, tc := range testcases {
 			t.Run(tt.name+"/"+sigName, func(t *testing.T) {
 				raw, err := json.Marshal(tt.gen())
 				require.NoError(t, err)
@@ -54,7 +59,7 @@ func TestTxInternalDataUnmarshalJSONEmptySignatures(t *testing.T) {
 				if sigName == "missing" {
 					delete(m, "signatures")
 				} else {
-					m["signatures"] = sigValue
+					m["signatures"] = tc.value
 				}
 				tampered, err := json.Marshal(m)
 				require.NoError(t, err)
@@ -63,20 +68,25 @@ func TestTxInternalDataUnmarshalJSONEmptySignatures(t *testing.T) {
 				require.NotPanics(t, func() {
 					err = json.Unmarshal(tampered, dec)
 				})
-				require.ErrorIs(t, err, errEmptyTxSignatures)
+				require.ErrorIs(t, err, tc.expectedErr)
 			})
 		}
 	}
 }
 
 func TestTxInternalDataUnmarshalJSONEmptyFeePayerSignatures(t *testing.T) {
-	malformed := map[string]interface{}{
-		"empty":   []interface{}{},
-		"null":    []interface{}{nil},
-		"missing": nil,
+	testcases := map[string]struct {
+		value       interface{}
+		expectedErr error
+	}{
+		"empty":           {[]interface{}{}, errEmptyTxSignatures},
+		"null_element":    {[]interface{}{nil}, errInvalidTxSignatureJSON},
+		"empty_element":   {[]interface{}{map[string]interface{}{}}, errInvalidTxSignatureJSON},
+		"partial_element": {[]interface{}{map[string]interface{}{"V": "0x1"}}, errInvalidTxSignatureJSON},
+		"missing":         {nil, errEmptyTxSignatures},
 	}
 
-	for sigName, sigValue := range malformed {
+	for sigName, tc := range testcases {
 		t.Run(sigName, func(t *testing.T) {
 			raw, err := json.Marshal(genFeeDelegatedValueTransferTransaction())
 			require.NoError(t, err)
@@ -86,7 +96,7 @@ func TestTxInternalDataUnmarshalJSONEmptyFeePayerSignatures(t *testing.T) {
 			if sigName == "missing" {
 				delete(m, "feePayerSignatures")
 			} else {
-				m["feePayerSignatures"] = sigValue
+				m["feePayerSignatures"] = tc.value
 			}
 			tampered, err := json.Marshal(m)
 			require.NoError(t, err)
@@ -95,7 +105,7 @@ func TestTxInternalDataUnmarshalJSONEmptyFeePayerSignatures(t *testing.T) {
 			require.NotPanics(t, func() {
 				err = json.Unmarshal(tampered, dec)
 			})
-			require.ErrorIs(t, err, errEmptyTxSignatures)
+			require.ErrorIs(t, err, tc.expectedErr)
 		})
 	}
 }
