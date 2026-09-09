@@ -26,9 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPrometheusExporterDoesNotExposePprof checks that the exporter serves
-// /metrics but not net/http/pprof's /debug/pprof/*, guarding against a regression
-// to a nil (DefaultServeMux) handler that would leak them on the Prometheus port.
+// TestPrometheusExporterDoesNotExposePprof verifies that newPrometheusMux
+// serves /metrics and does not expose the pprof routes registered on
+// http.DefaultServeMux.
 func TestPrometheusExporterDoesNotExposePprof(t *testing.T) {
 	server := httptest.NewServer(newPrometheusMux())
 	t.Cleanup(server.Close)
