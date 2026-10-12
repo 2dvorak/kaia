@@ -18,9 +18,9 @@ package discover
 
 import (
 	"net"
-	"runtime"
 	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -159,57 +159,41 @@ func Test_Table_Bond_happy(t *testing.T) {
 
 func Test_Table_Bond_duplicate(t *testing.T) {
 	n := newTestNode(t, NodeTypeEN)
-	pingEntered := make(chan struct{}, 2)
-	pingBlocker := make(chan struct{})
 	udp := newMockTransport()
-	udp.pingFn = func(id NodeID, addr *net.UDPAddr) error {
-		pingEntered <- struct{}{}
-		<-pingBlocker
-		return nil
-	}
 	tab := newTestTable2(t, udp)
 
-	var err1, err2 error
-	var wg sync.WaitGroup
-	secondStarted := make(chan struct{})
+	// synctest.Wait returns only once each Bond call is blocked, so the second call can't start after the first ends.
+	synctest.Test(t, func(t *testing.T) {
+		pingBlocker := make(chan struct{})
+		udp.pingFn = func(id NodeID, addr *net.UDPAddr) error {
+			<-pingBlocker
+			return nil
+		}
 
-	// The first Bond call should register a task and execute ping.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err1 = tab.Bond(false, n)
-	}()
-	<-pingEntered // Wait until the first Bond has registered its task and is executing ping.
+		var err1, err2 error
+		var wg sync.WaitGroup
 
-	// The second Bond call should join the in-flight singleflight call and wait for it.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		close(secondStarted)
-		err2 = tab.Bond(false, n)
-	}()
-	<-secondStarted
-	for i := 0; i < 100; i++ {
-		// Give the second goroutine a scheduling chance to reach Bond().
-		runtime.Gosched()
-	}
+		// The first Bond call should register a task and execute ping.
+		wg.Go(func() { err1 = tab.Bond(false, n) })
+		synctest.Wait()
 
-	// If duplicate suppression is broken, a second ping enters while the first is blocked.
-	select {
-	case <-pingEntered:
-		t.Fatal("duplicate Bond should not issue a second ping while first ping is blocked")
-	default:
-	}
+		// The second Bond call should join the in-flight singleflight call and wait for it.
+		wg.Go(func() { err2 = tab.Bond(false, n) })
+		synctest.Wait()
 
-	close(pingBlocker) // release the in-flight ping
-	wg.Wait()
+		// If duplicate suppression is broken, a second ping is in flight now.
+		assert.Equal(t, int32(1), udp.pingCnt.Load(), "duplicate Bond should not issue a second ping while first ping is blocked")
 
-	// Both callers should receive the same (nil) error.
-	assert.NoError(t, err1)
-	assert.NoError(t, err2)
+		close(pingBlocker) // release the in-flight ping
+		wg.Wait()
 
-	// Only one actual ping must have been issued.
-	assert.Equal(t, int32(1), udp.pingCnt.Load())
+		// Both callers should receive the same (nil) error.
+		assert.NoError(t, err1)
+		assert.NoError(t, err2)
+
+		// Only one actual ping must have been issued.
+		assert.Equal(t, int32(1), udp.pingCnt.Load())
+	})
 }
 
 func Test_Table_Bond_recentlyBonded(t *testing.T) {
