@@ -1199,7 +1199,10 @@ func TestGetBlockHeaders(t *testing.T) {
 	t.Parallel()
 
 	db, backend := newTestBackendWithGenerator(downloader.MaxHeaderFetch+15, nil)
+	defer db.Close()
+	defer backend.Stop()
 	peer, _, net := newBasePeer()
+	defer net.Close()
 
 	// Create a "random" unknown hash for testing
 	var unknown common.Hash
@@ -1373,10 +1376,8 @@ func TestGetBlockHeaders(t *testing.T) {
 		},
 	}
 
-	pm, err := NewProtocolManager(params.TestChainConfig, downloader.FullSync, 1, nil, nil, faker.NewFaker(), backend, db, 1, common.ENDPOINTNODE, &Config{TxResendUseLegacy: false, TxResendInterval: 1, TxResendCount: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Header queries only need the chain. Avoid starting background protocol loops.
+	pm := &ProtocolManager{blockchain: backend}
 
 	// Run each of the tests and verify the results against the chain
 	for i, tt := range tests {
