@@ -419,9 +419,15 @@ func (sb *backend) VerifyProposalBody(proposal bft.Proposal) error {
 	// The checks below mirror BlockValidator.ValidateBody, so a bad proposal is rejected
 	// here instead of being PREPARE/COMMIT-ed and then refused on the import path.
 
-	// check EIP-7934 RLP-encoded block size cap
-	if sb.chain.Config().IsOsakaForkEnabled(block.Number()) && block.Size() > params.MaxBlockSize {
-		return blockchain.ErrBlockOversized
+	// check EIP-7934 RLP-encoded block size cap on the block as it will be imported
+	if sb.chain.Config().IsOsakaForkEnabled(block.Number()) {
+		size, err := sb.committedSize(block)
+		if err != nil {
+			return err
+		}
+		if size > params.MaxBlockSize {
+			return blockchain.ErrBlockOversized
+		}
 	}
 
 	// check block body
@@ -457,6 +463,30 @@ func (sb *backend) VerifyProposalBody(proposal bft.Proposal) error {
 		return errors.New("data blobs present in block body")
 	}
 	return nil
+}
+
+// committedSize returns the block size after Commit adds a committed seal from
+// every qualified validator, the most seals a committed block can carry.
+func (sb *backend) committedSize(block *types.Block) (uint64, error) {
+	if sb.valsetModule == nil {
+		return 0, istanbul.ErrNoEssentialModule
+	}
+	qualified, err := sb.valsetModule.GetQualifiedValidators(block.NumberU64())
+	if err != nil {
+		return 0, err
+	}
+	if len(qualified) == 0 {
+		return uint64(block.Size()), nil
+	}
+	seals := make([][]byte, len(qualified))
+	for i := range seals {
+		seals[i] = make([]byte, istanbul.IstanbulExtraSeal)
+	}
+	header := block.Header()
+	if err := sb.sealer.WriteCommittedSeals(header, seals); err != nil {
+		return 0, err
+	}
+	return uint64(block.WithSeal(header).Size()), nil
 }
 
 // Sign implements istanbul.Backend.Sign

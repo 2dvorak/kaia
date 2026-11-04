@@ -354,6 +354,12 @@ func TestSealStartingAfterItsBlockCommitted(t *testing.T) {
 // chain's current head.
 func buildBlockWithTx(t *testing.T, chain *blockchain.BlockChain, engine *backend, txdata *types.TxInternalDataLegacy) *types.Block {
 	t.Helper()
+	return sealBlock(engine, buildUnsealedBlockWithTx(t, chain, txdata))
+}
+
+// buildUnsealedBlockWithTx is buildBlockWithTx without any seal.
+func buildUnsealedBlockWithTx(t *testing.T, chain *blockchain.BlockChain, txdata *types.TxInternalDataLegacy) *types.Block {
+	t.Helper()
 	parent := chain.CurrentBlock()
 	header := makeHeader(parent, chain.Config())
 	if err := chain.PrepareHeader(header); err != nil {
@@ -378,7 +384,7 @@ func buildBlockWithTx(t *testing.T, chain *blockchain.BlockChain, engine *backen
 	}
 	// NewBlock recomputes the header TxHash from the supplied tx, so Verify's tx-root
 	// check still passes.
-	return sealBlock(engine, types.NewBlock(emptyBlock.Header(), []*types.Transaction{signedTx}, nil))
+	return types.NewBlock(emptyBlock.Header(), []*types.Transaction{signedTx}, nil)
 }
 
 // buildOversizedBlock returns a sealed block whose RLP-encoded size exceeds
@@ -422,6 +428,57 @@ func TestBackend_VerifyEnforcesBlockSizeCap(t *testing.T) {
 		assert.ErrorIs(t, engine.VerifyProposalBody(oversized), blockchain.ErrBlockOversized)
 		_, err = engine.Verify(oversized)
 		assert.ErrorIs(t, err, blockchain.ErrBlockOversized)
+	})
+
+	// The cap applies to the proposal with its committed seals added.
+	t.Run("committed seals", func(t *testing.T) {
+		chain, engine := newBlockChain(t, 1, osakaCompatibleBlock(big.NewInt(0)))
+		defer chain.Stop()
+		defer engine.Stop()
+
+		// build returns the unsealed block whose proposal (proposer seal only) is size bytes.
+		recipient := common.Address{}
+		build := func(size uint64) *types.Block {
+			payload := int(params.MaxBlockSize) - 1000
+			for i := 0; i < 5; i++ {
+				unsealed := buildUnsealedBlockWithTx(t, chain, &types.TxInternalDataLegacy{
+					Price:     big.NewInt(1),
+					GasLimit:  1,
+					Recipient: &recipient,
+					Amount:    big.NewInt(0),
+					Payload:   make([]byte, payload),
+				})
+				proposal, err := engine.updateBlock(unsealed)
+				require.NoError(t, err)
+				if got := uint64(proposal.Size()); got != size {
+					payload += int(size) - int(got)
+					continue
+				}
+				return unsealed
+			}
+			t.Fatalf("test setup: cannot build a proposal of %d bytes", size)
+			return nil
+		}
+		proposalOf := func(unsealed *types.Block) *types.Block {
+			proposal, err := engine.updateBlock(unsealed)
+			require.NoError(t, err)
+			return proposal
+		}
+
+		// The largest proposal that still fits once committed.
+		probe := build(params.MaxBlockSize - 10_000)
+		growth := uint64(sealBlock(engine, probe).Size() - proposalOf(probe).Size())
+		limit := params.MaxBlockSize - growth
+
+		fits := build(limit)
+		assert.NoError(t, engine.VerifyProposalBody(proposalOf(fits)))
+		assert.NoError(t, chain.Validator().ValidateBody(sealBlock(engine, fits)))
+
+		tooBig := build(limit + 1)
+		assert.ErrorIs(t, engine.VerifyProposalBody(proposalOf(tooBig)), blockchain.ErrBlockOversized)
+		_, err := engine.Verify(proposalOf(tooBig))
+		assert.ErrorIs(t, err, blockchain.ErrBlockOversized)
+		assert.ErrorIs(t, chain.Validator().ValidateBody(sealBlock(engine, tooBig)), blockchain.ErrBlockOversized)
 	})
 
 	// Pre-Osaka: the cap is gated on IsOsakaForkEnabled, so it must not apply.
